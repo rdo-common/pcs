@@ -1,6 +1,6 @@
 Name: pcs		
-Version: 0.9.99
-Release: 2%{?dist}
+Version: 0.9.115
+Release: 32%{?dist}
 License: GPLv2
 URL: http://github.com/feist/pcs
 Group: System Environment/Base
@@ -9,7 +9,9 @@ BuildRequires: python2-devel
 Summary: Pacemaker Configuration System	
 Source0: http://people.redhat.com/cfeist/pcs/pcs-withgems-%{version}.tar.gz
 Source1: HAM-logo.png
-BuildRequires: ruby >= 2.0.0 ruby-devel rubygems pam-devel
+Patch1: rebase.patch
+Patch2: bz1078343-Add-support-for-setting-certain-corosync-totem-optio.patch
+BuildRequires: ruby >= 2.0.0 ruby-devel rubygems pam-devel git
 BuildRequires: systemd-units rubygem-bundler
 Requires(post): systemd
 Requires(preun): systemd
@@ -21,11 +23,11 @@ pcs is a corosync and pacemaker configuration tool.  It permits users to
 easily view, modify and created pacemaker based clusters.
 
 %prep
-%setup -q
+%autosetup -p1 -S git
+
 cp -f %SOURCE1 pcsd/public/images
 
 %build
-
 
 %install
 rm -rf $RPM_BUILD_ROOT
@@ -46,7 +48,6 @@ chmod 755 $RPM_BUILD_ROOT/%{python_sitelib}/pcs/pcs.py
 %postun
 %systemd_postun_with_restart pcsd.service
 
-
 %files
 %defattr(-,root,root,-)
 %{python_sitelib}/pcs
@@ -64,10 +65,134 @@ chmod 755 $RPM_BUILD_ROOT/%{python_sitelib}/pcs/pcs.py
 /etc/sysconfig/pcsd
 %{_mandir}/man8/pcs.*
 
-
 %doc COPYING README
 
 %changelog
+* Tue Mar 25 2014 Chris Feist <cfeist@redhat.com> - 0.9.115-32
+- Add ability to set totem options with pcs during cluster setup
+
+* Tue Feb 25 2014 Chris Feist <cfeist@redhat.com> - 0.9.115-31
+- Add ability to see group/clone/ms constraints and meta attributes in pcsd
+
+* Mon Feb 24 2014 Chris Feist <cfeist@redhat.com> - 0.9.115-30
+- Fix traceback with bad arguments to location rules
+- Fix results code when attempting to remove an order that doesn't exist
+
+* Fri Feb 21 2014 Chris Feist <cfeist@redhat.com> - 0.9.115-29
+- Don't allow users to clone groups that have already been cloned
+- Fix order remove <resource> to remove resources from sets
+- Don't allow a user to force-start a group, clone or master/slave
+- When using debug-start use proper return code
+- Added cluster properties hover text
+- Fixed issue with stripping a nil value
+- HTML escape resource descriptions
+
+* Wed Feb 19 2014 Chris Feist <cfeist@redhat.com> - 0.9.115-28
+- Remove leading/trailing white space in resource descriptions
+- Added tooltips for advanced cluster creation options
+- Fixed other 'Remove fence devices' button
+- When deleting a resource with pcsd use --force to prevent issues
+- Add proper tooltip for resource description info icon
+- Fix for long cluster names in menu
+- Do a better job of detecting when to send a redirect and when to notif
+- Don't silently ignore bad operation names
+
+* Tue Feb 18 2014 Chris Feist <cfeist@redhat.com> - 0.9.115-27
+- Added --nodesc option to pcs stonith list
+- Don't attempt to print metadata for fence_sanlockd
+
+* Tue Feb 18 2014 Chris Feist <cfeist@redhat.com> - 0.9.115-26
+- Fixed dialog text when removing a fence device
+- Show tool tips for optional fence agent arguments
+- Fix bad link on resource remove sprite
+- When removing a resource or fence device, show blank info
+- Fix resource management issues when pacemaker is not running
+- If first node is down, allow other nodes to show resource/stonith forms
+- Removing all nodes, now removes cluster configuration
+- Added ability to see nodes corosync/pacemaker/pcsd startup settings
+- Added extra colspan to improve long cluster name display
+- Added ability to configure IPv6 cluster
+- Added ability to set corosync transport in GUI
+- Added ability to set advanced cluster options on creation
+- Renamed last_node_standing to last_man_standing
+- On cluster creation color unauthorized nodes in orange
+- Added proper redirect when session variable times out
+- Fixed traceback when missing authentication tokens
+
+* Mon Feb 17 2014 Chris Feist <cfeist@redhat.com> - 0.9.115-24
+- Added support for meta attributes in the GUI
+- Moved pcmk_host_list/map/check to optional arguments
+
+* Wed Feb 12 2014 Chris Feist <cfeist@redhat.com> - 0.9.115-23
+- Added ability to use 'and/or' with rules
+- Fixed stonith optional arguments in pcsd
+
+* Tue Feb 11 2014 Chris Feist <cfeist@redhat.com> - 0.9.115-22
+- Fixed selection arrow when selecting new resource on resources page
+- Fixed permissions on pcsd.service file
+
+* Thu Feb 06 2014 Chris Feist <cfeist@redhat.com> - 0.9.115-21
+- Added support for resource descriptions
+- Show all nodes a resource is on for cloned resources
+- Improve visibility of dropdown menus
+- Keep last attempted login username if login fails
+
+* Tue Feb 04 2014 Chris Feist <cfeist@redhat.com> - 0.9.115-20
+- Fixed issue when removing all resources or fence devices
+- Fixed duplicate id on fence device page
+
+* Mon Feb 03 2014 Chris Feist <cfeist@redhat.com> - 0.9.115-19
+- Fixed issue when creating a cluster from the GUI on a node that isn't in
+  the newly formed cluster
+- The GUI is now better at keeping track of nodes in the cluster
+
+* Tue Jan 28 2014 Chris Feist <cfeist@redhat.com> - 0.9.115-17
+- Fixed issue with cluster properties not displaying properly when running
+  pcsd on a node that was not in the cluster being managed
+- Fixed /etc/sysconfig/pcsd file for pcsd
+
+* Tue Jan 28 2014 Chris Feist <cfeist@redhat.com> - 0.9.115-1
+- Re-synced to upstream sources
+
+* Fri Jan 24 2014 Daniel Mach <dmach@redhat.com> - 0.9.114-2
+- Mass rebuild 2014-01-24
+
+* Thu Jan 23 2014 Chris Feist <cfeist@redhat.com> - 0.9.114-1
+- Re-synced to upstream sources
+
+* Wed Jan 22 2014 Chris Feist <cfeist@redhat.com> - 0.9.113-1
+- Re-synced to upstream sources
+
+* Mon Jan 20 2014 Chris Feist <cfeist@redhat.com> - 0.9.112-1
+- Re-synced to upstream sources
+
+* Mon Jan 20 2014 Chris Feist <cfeist@redhat.com> - 0.9.111-1
+- Re-synced to upstream sources
+
+* Fri Jan 17 2014 Chris Feist <cfeist@redhat.com> - 0.9.110-1
+- Re-synced to upstream sources
+
+* Wed Jan 15 2014 Chris Feist <cfeist@redhat.com> - 0.9.108-1
+- Re-synced to upstream sources
+
+* Wed Jan 15 2014 Chris Feist <cfeist@redhat.com> - 0.9.107-1
+- Re-synced to upstream sources
+
+* Tue Jan 14 2014 Chris Feist <cfeist@redhat.com> - 0.9.106-1
+- Re-synced to upstream sources
+
+* Mon Jan 13 2014 Chris Feist <cfeist@redhat.com> - 0.9.105-1
+- Re-synced to upstream sources
+
+* Fri Jan 10 2014 Chris Feist <cfeist@redhat.com> - 0.9.104-1
+- Re-synced to upstream sources
+
+* Fri Dec 27 2013 Daniel Mach <dmach@redhat.com> - 0.9.100-2
+- Mass rebuild 2013-12-27
+
+* Tue Nov 12 2013 Chris Feist <cfeist@redhat.com> - 0.9.100-1
+- Re-synced to upstream sources
+
 * Thu Nov 07 2013 Chris Feist <cfeist@redhat.com> - 0.9.99-2
 - Re-synced to upstream sources
 
