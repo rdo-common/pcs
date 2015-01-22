@@ -1,6 +1,6 @@
 Name: pcs		
 Version: 0.9.115
-Release: 32%{?dist}
+Release: 32%{?dist}.1
 License: GPLv2
 URL: http://github.com/feist/pcs
 Group: System Environment/Base
@@ -11,6 +11,7 @@ Source0: http://people.redhat.com/cfeist/pcs/pcs-withgems-%{version}.tar.gz
 Source1: HAM-logo.png
 Patch1: rebase.patch
 Patch2: bz1078343-Add-support-for-setting-certain-corosync-totem-optio.patch
+Patch3: bz1184223-clone-one-step-fix.patch
 BuildRequires: ruby >= 2.0.0 ruby-devel rubygems pam-devel git
 BuildRequires: systemd-units rubygem-bundler
 Requires(post): systemd
@@ -68,6 +69,11 @@ chmod 755 $RPM_BUILD_ROOT/%{python_sitelib}/pcs/pcs.py
 %doc COPYING README
 
 %changelog
+* Tue Jan 20 2015 Chris Feist <cfeist@redhat.com> - 0.9.115-32.el7_0.1
+- Do pcs resource create --clone/--master/--group in one step instead of
+  two to prevent race conditions
+- Resolves: rhbz#1184223
+
 * Tue Mar 25 2014 Chris Feist <cfeist@redhat.com> - 0.9.115-32
 - Add ability to set totem options with pcs during cluster setup
 
