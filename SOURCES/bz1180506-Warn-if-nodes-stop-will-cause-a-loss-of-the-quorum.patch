@@ -1,0 +1,317 @@
+From 200559d8ca0b834f90d4f2ba70e8f7ce403b9726 Mon Sep 17 00:00:00 2001
+From: Tomas Jelinek <tojeline@redhat.com>
+Date: Fri, 16 Jan 2015 16:31:49 +0100
+Subject: [PATCH] Warn if nodes stop will cause a loss of the quorum
+
+---
+ pcs/cluster.py         |  68 +++++++++++
+ pcs/utils.py           |  77 ++++++++++--
+ pcsd/public/js/pcsd.js |  41 ++++++-
+ pcsd/remote.rb         |  35 ++++--
+ 5 files changed, 513 insertions(+), 17 deletions(-)
+
+diff --git a/pcs/cluster.py b/pcs/cluster.py
+index 05dc91a..e4829f1 100644
+--- a/pcs/cluster.py
++++ b/pcs/cluster.py
+@@ -676,6 +676,55 @@ def stop_cluster_all():
+     stop_cluster_nodes(utils.getNodesFromCorosyncConf())
+ 
+ def stop_cluster_nodes(nodes):
++    all_nodes = utils.getNodesFromCorosyncConf()
++    unknown_nodes = set(nodes) - set(all_nodes)
++    if unknown_nodes:
++        utils.err(
++            "nodes '%s' do not appear to exist in configuration"
++            % "', '".join(unknown_nodes)
++        )
++
++    stopping_all = set(nodes) >= set(all_nodes)
++    if (
++        not "--force" in utils.pcs_options
++        and
++        not stopping_all
++        and
++        not utils.is_rhel6()
++    ):
++        # we are sure we are not on cman cluster because only nodes from
++        # a local cluster can be stopped (see nodes validation above)
++        error_list = []
++        for node in nodes:
++            retval, data = utils.get_remote_quorumtool_output(node)
++            if retval != 0:
++                error_list.append(node + ": " + data)
++                continue
++            quorum_info = utils.parse_quorumtool_output(data)
++            if quorum_info:
++                if not quorum_info["quorate"]:
++                    continue
++                if utils.is_node_stop_cause_quorum_loss(
++                    quorum_info, local=False, node_list=nodes
++                ):
++                    utils.err(
++                        "Stopping the node(s) will cause a loss of the quorum"
++                        + ", use --force to override"
++                    )
++                else:
++                    # We have the info, no need to print errors
++                    error_list = []
++                    break
++            if data.strip() != "Cannot initialize CMAP service":
++                error_list.append("Unable to get quorum status")
++            # else the node seems to be stopped already
++        if error_list:
++            utils.err(
++                "Unable to determine whether stopping the nodes will cause "
++                + "a loss of the quorum, use --force to override\n"
++                + "\n".join(error_list)
++            )
++
+     threads = dict()
+     for node in nodes:
+         threads[node] = NodeStopPacemakerThread(node)
+@@ -764,6 +813,25 @@ def stop_cluster(argv):
+         stop_cluster_nodes(argv)
+         return
+ 
++    if not "--force" in utils.pcs_options and not utils.is_rhel6():
++        output, retval = utils.run(["corosync-quorumtool", "-p", "-s"])
++        # retval is 0 on success if node is not in partition with quorum
++        # retval is 1 on error OR on success if node has quorum
++        quorum_info = utils.parse_quorumtool_output(output)
++        if quorum_info:
++            if utils.is_node_stop_cause_quorum_loss(quorum_info, local=True):
++                utils.err(
++                    "Stopping the node will cause a loss of the quorum"
++                    + ", use --force to override"
++                )
++        else:
++            if output.strip() != "Cannot initialize CMAP service":
++                utils.err(
++                    "Unable to determine whether stopping the node will cause "
++                    + "a loss of the quorum, use --force to override"
++                )
++            # else the node seems to be stopped already, proceed to be sure
++
+     stop_all = (
+         "--pacemaker" not in utils.pcs_options
+         and
+diff --git a/pcs/utils.py b/pcs/utils.py
+index 82b71c6..2f718e7 100644
+--- a/pcs/utils.py
++++ b/pcs/utils.py
+@@ -211,15 +211,15 @@ def setCorosyncConfig(node,config):
+ def startCluster(node, quiet=False):
+     return sendHTTPRequest(node, 'remote/cluster_start', None, False, not quiet)
+ 
+-def stopCluster(node, quiet=False, pacemaker=True, corosync=True):
+-    if (pacemaker and corosync) or (not pacemaker and not corosync):
+-        data = None
+-    elif pacemaker:
+-        data = {"component": "pacemaker"}
+-    elif corosync:
+-        data = {"component": "corosync"}
+-    if data:
+-        data = urllib.urlencode(data)
++def stopCluster(node, quiet=False, pacemaker=True, corosync=True, force=True):
++    data = dict()
++    if pacemaker and not corosync:
++        data["component"] = "pacemaker"
++    elif corosync and not pacemaker:
++        data["component"] = "corosync"
++    if force:
++        data["force"] = 1
++    data = urllib.urlencode(data)
+     return sendHTTPRequest(node, 'remote/cluster_stop', data, False, not quiet)
+ 
+ def enableCluster(node):
+@@ -2286,3 +2286,62 @@ def get_operations_from_transitions(transitions_dom):
+     op_list = [op[1] for op in operation_list]
+     return op_list
+ 
++def get_remote_quorumtool_output(node):
++    return sendHTTPRequest(node, "remote/get_quorum_info", None, False, False)
++
++def parse_quorumtool_output(quorumtool_output):
++    parsed = {}
++    in_node_list = False
++    try:
++        for line in quorumtool_output.split("\n"):
++            line = line.strip()
++            if not line:
++                continue
++            if in_node_list:
++                if line.startswith("-") or line.startswith("Nodeid"):
++                    # skip headers
++                    continue
++                parts = line.split()
++                parsed["node_list"].append({
++                    "name": parts[3],
++                    "votes": int(parts[1]),
++                    "local": len(parts) > 4 and parts[4] == "(local)"
++                })
++            else:
++                if line == "Membership information":
++                    in_node_list = True
++                    parsed["node_list"] = []
++                    continue
++                if not ":" in line:
++                    continue
++                parts = map(lambda x: x.strip(), line.split(":", 1))
++                if parts[0] == "Quorate":
++                    parsed["quorate"] = parts[1].lower() == "yes"
++                elif parts[0] == "Quorum":
++                    match = re.match("(\d+).*", parts[1])
++                    if match:
++                        parsed["quorum"] = int(match.group(1))
++                    else:
++                        return None
++    except (ValueError, IndexError):
++        return None
++    for required in ("quorum", "quorate", "node_list"):
++        if required not in parsed:
++            return None
++    return parsed
++
++# node_list - nodes to stop
++# local - local node is going to be stopped
++def is_node_stop_cause_quorum_loss(quorum_info, local=True, node_list=None):
++    if not quorum_info["quorate"]:
++        return False
++    # sum the votes of nodes that are not going to be stopped
++    votes_after_stop = 0
++    for node_info in quorum_info.get("node_list", []):
++        if local and node_info["local"]:
++            continue
++        if node_list and node_info["name"] in node_list:
++            continue
++        votes_after_stop += node_info["votes"]
++    return votes_after_stop < quorum_info["quorum"]
++
+diff --git a/pcsd/public/js/pcsd.js b/pcsd/public/js/pcsd.js
+index cbfc621..30473c9 100644
+--- a/pcsd/public/js/pcsd.js
++++ b/pcsd/public/js/pcsd.js
+@@ -481,7 +481,7 @@ function setup_node_links() {
+   $("#node_stop").click(function() {
+     node = $("#node_info_header_title_name").text();
+     fade_in_out("#node_stop");
+-    $.post('/remote/cluster_stop', {"name": $.trim(node)});
++    node_stop($.trim(node), false);
+   });
+   $("#node_restart").click(function() {
+     node = $("#node_info_header_title_name").text();
+@@ -500,6 +500,45 @@ function setup_node_links() {
+   });
+ }
+ 
++function node_stop(node, force) {
++  var data = {};
++  data["name"] = node;
++  if (force) {
++    data["force"] = force;
++  }
++  $.ajax({
++    type: 'POST',
++    url: '/remote/cluster_stop',
++    data: data,
++    timeout: pcs_timeout,
++    success: function() {
++    },
++    error: function(xhr, status, error) {
++      if ((status == "timeout") || ($.trim(error) == "timeout")) {
++        /*
++         We are not interested in timeout because:
++         - it can take minutes to stop a node (resources running on it have
++           to be stopped/moved and we do not need to wait for that)
++         - if pcs is not able to stop a node it returns an (forceable) error
++           immediatelly
++        */
++        return;
++      }
++      var message = "Unable to stop node '" + node + "' (" + $.trim(error) + ")";
++      message += "\n" + xhr.responseText;
++      if (message.indexOf('--force') == -1) {
++        alert(message);
++      }
++      else {
++        message = message.replace(', use --force to override', '');
++        if (confirm(message + "\n\nDo you want to force the operation?")) {
++          node_stop(node, true);
++        }
++      }
++    }
++  });
++}
++
+ function setup_resource_links(link_type) {
+   Ember.debug("Setup resource links");
+   $("#resource_delete_link").click(function () {
+diff --git a/pcsd/remote.rb b/pcsd/remote.rb
+index e818288..cbbcc12 100644
+--- a/pcsd/remote.rb
++++ b/pcsd/remote.rb
+@@ -21,6 +21,8 @@ def remote(params,request)
+     return setup_cluster(params)
+   when "create_cluster"
+     return create_cluster(params)
++  when "get_quorum_info"
++    return get_quorum_info(params)
+   when "get_cib"
+     return get_cib(params)
+   when "get_corosync_conf"
+@@ -156,18 +158,22 @@ def cluster_stop(params)
+       params[:name], 'cluster_stop', true, params_without_name
+     )
+   else
+-    options = ""
++    options = []
+     if params.has_key?("component")
+       if params["component"].downcase == "pacemaker"
+-        options = "--pacemaker"
++        options << "--pacemaker"
+       elsif params["component"].downcase == "corosync"
+-        options = "--corosync"
++        options << "--corosync"
+       end
+     end
+-    $logger.info "Stopping Daemons #{options}"
+-    output =  `#{PCS} cluster stop #{options}`
+-    $logger.debug output
+-    return output
++    options << "--force" if params["force"]
++    $logger.info "Stopping Daemons"
++    stdout, stderr, retval = run_cmd(PCS, "cluster", "stop", *options)
++    if retval != 0
++      return [400, stderr.join]
++    else
++      return stdout.join
++    end
+   end
+ end
+ 
+@@ -274,6 +280,21 @@ def cluster_disable(params)
+   end
+ end
+ 
++def get_quorum_info(params)
++  if ISRHEL6
++    return ''
++  else
++    stdout, stderr, retval = run_cmd("corosync-quorumtool", "-p", "-s")
++    # retval is 0 on success if node is not in partition with quorum
++    # retval is 1 on error OR on success if node has quorum
++    if stderr.length > 0
++      return stderr.join
++    else
++      return stdout.join
++    end
++  end
++end
++
+ def get_cib(params)
+   cib, stderr, retval = run_cmd(CIBADMIN, "-Ql")
+   if retval != 0
+-- 
+1.9.1
+

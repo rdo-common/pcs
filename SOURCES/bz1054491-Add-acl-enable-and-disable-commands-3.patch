@@ -1,0 +1,115 @@
+From 3732bb03e2f0b710e85b502c772ad7174d91db80 Mon Sep 17 00:00:00 2001
+From: Tomas Jelinek <tojeline@redhat.com>
+Date: Thu, 8 Jan 2015 16:00:47 +0100
+Subject: [PATCH] Add acl enable and disable commands
+
+* add acl enable and disable commands
+* display whether acls are enabled in the 'pcs acl' output
+---
+ pcs/acl.py           | 19 +++++++++++++
+ pcs/pcs.8            |  6 ++++
+ pcs/usage.py         |  6 ++++
+ pcs/utils.py         |  5 ++++
+ 5 files changed, 92 insertions(+), 21 deletions(-)
+
+diff --git a/pcs/acl.py b/pcs/acl.py
+index aa07d40..4c2d696 100644
+--- a/pcs/acl.py
++++ b/pcs/acl.py
+@@ -1,6 +1,7 @@
+ import sys
+ import usage
+ import utils
++import prop
+ 
+ def acl_cmd(argv):
+     if len(argv) == 0:
+@@ -18,6 +19,10 @@ def acl_cmd(argv):
+         acl_show(argv)
+ #    elif (sub_cmd == "grant"):
+ #        acl_grant(argv)
++    elif (sub_cmd == "enable"):
++        acl_enable(argv)
++    elif (sub_cmd == "disable"):
++        acl_disable(argv)
+     elif (sub_cmd == "role"):
+         acl_role(argv)
+     elif (sub_cmd == "target" or sub_cmd == "user"):
+@@ -33,10 +38,24 @@ def acl_cmd(argv):
+ def acl_show(argv):
+     dom = utils.get_cib_dom()
+ 
++    properties = prop.get_set_properties(defaults=prop.get_default_properties())
++    acl_enabled = properties.get("enable-acl", "").lower()
++    if utils.is_cib_true(acl_enabled):
++        print "ACLs are enabled"
++    else:
++        print "ACLs are disabled, run 'pcs acl enable' to enable"
++    print
++
+     print_targets(dom)
+     print_groups(dom)
+     print_roles(dom)
+ 
++def acl_enable(argv):
++    prop.set_property(["enable-acl=true"])
++
++def acl_disable(argv):
++    prop.set_property(["enable-acl=false"])
++
+ def acl_grant(argv):
+     print "Not yet implemented"
+ 
+diff --git a/pcs/pcs.8 b/pcs/pcs.8
+index 00ac11b..14917f7 100644
+--- a/pcs/pcs.8
++++ b/pcs/pcs.8
+@@ -316,6 +316,12 @@ Confirm that the host specified is currently down.  WARNING: if this node is not
+ [show]
+ List all current access control lists
+ .TP
++enable
++Enable access control lists
++.TP
++disable
++Disable access control lists
++.TP
+ role create <role name> [description=<description>] [((read | write | deny) (xpath <query> | id <id>))...]
+ Create a role with the name and (optional) description specified.
+ Each role can also have an unlimited number of permissions
+diff --git a/pcs/usage.py b/pcs/usage.py
+index 7bd3368..2c39901 100644
+--- a/pcs/usage.py
++++ b/pcs/usage.py
+@@ -969,6 +969,12 @@ Commands:
+     [show]
+         List all current access control lists
+ 
++    enable
++        Enable access control lists
++
++    disable
++        Disable access control lists
++
+     role create <role name> [description=<description>] [((read | write | deny)
+                                                 (xpath <query> | id <id>))...]
+         Create a role with the name and (optional) description specified.
+diff --git a/pcs/utils.py b/pcs/utils.py
+index 8713c81..de000fa 100644
+--- a/pcs/utils.py
++++ b/pcs/utils.py
+@@ -2129,6 +2129,11 @@ def is_iso8601_date(var):
+     output, retVal = run(["iso8601", "-d", var])
+     return retVal == 0
+ 
++# Does pacemaker consider a variable as true in cib?
++# See crm_is_true in pacemaker/lib/common/utils.c
++def is_cib_true(var):
++    return var.lower() in ("true", "on", "yes", "y", "1")
++
+ def is_systemctl():
+     if os.path.exists('/usr/bin/systemctl'):
+         return True
+-- 
+1.9.1
+

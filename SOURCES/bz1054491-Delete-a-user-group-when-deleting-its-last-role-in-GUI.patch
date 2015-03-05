@@ -1,0 +1,45 @@
+From 50333856badcd0dd6d0f4e4876fd605738317ef9 Mon Sep 17 00:00:00 2001
+From: Tomas Jelinek <tojeline@redhat.com>
+Date: Wed, 7 Jan 2015 13:08:26 +0100
+Subject: [PATCH] Delete a user/group when deleting its last ACl role in GUI
+
+---
+ pcs/acl.py     | 6 +++++-
+ pcsd/remote.rb | 4 +++-
+ 2 files changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/pcs/acl.py b/pcs/acl.py
+index cbaef37..aa07d40 100644
+--- a/pcs/acl.py
++++ b/pcs/acl.py
+@@ -107,7 +107,11 @@ def acl_role(argv):
+         # Remove any references to this role in acl_target or acl_group
+         for elem in dom.getElementsByTagName("role"):
+             if elem.getAttribute("id") == role_id:
+-                elem.parentNode.removeChild(elem)
++                user_group = elem.parentNode
++                user_group.removeChild(elem)
++                if "--autodelete" in utils.pcs_options:
++                    if not user_group.getElementsByTagName("role"):
++                        user_group.parentNode.removeChild(user_group)
+ 
+         utils.replace_cib_configuration(dom)
+     elif command == "assign":
+diff --git a/pcsd/remote.rb b/pcsd/remote.rb
+index 2e898ab..9709941 100644
+--- a/pcsd/remote.rb
++++ b/pcsd/remote.rb
+@@ -914,7 +914,9 @@ def remove_acl_roles_remote(params)
+   errors = ""
+   params.each { |name, value|
+     if name.index("role-") == 0
+-      out, errout, retval = run_cmd(PCS, "acl", "role", "delete", value.to_s)
++      out, errout, retval = run_cmd(
++        PCS, "acl", "role", "delete", value.to_s, "--autodelete"
++      )
+       if retval != 0
+         errors += "Unable to remove role #{value}"
+         unless errout.include?("cib_replace failure")
+-- 
+1.9.1
+

@@ -1,0 +1,92 @@
+From fa9757a8c2eb47d4d8f56179e9ed392e3e49d9f0 Mon Sep 17 00:00:00 2001
+From: Chris Feist <cfeist@redhat.com>
+Date: Mon, 5 Jan 2015 21:10:27 -0600
+Subject: [PATCH] Added support for resource-discovery on location constraints
+
+---
+ pcs/constraint.py            | 28 ++++++++++++++++++++++++----
+ pcs/pcs.8                    |  4 ++--
+ pcs/test/test_constraints.py | 21 +++++++++++++++++++++
+ pcs/usage.py                 | 11 ++++++-----
+ 4 files changed, 53 insertions(+), 11 deletions(-)
+
+diff --git a/pcs/constraint.py b/pcs/constraint.py
+index 403429b..ff5b583 100644
+--- a/pcs/constraint.py
++++ b/pcs/constraint.py
+@@ -884,6 +884,7 @@ def location_show(argv):
+             show_location_rules(miniruleshash,showDetail, True)
+ 
+ def show_location_rules(ruleshash,showDetail,noheader=False):
++    constraint_options = {}
+     for rsc in ruleshash:
+         constrainthash= defaultdict(list)
+         if not noheader:
+@@ -891,9 +892,17 @@ def show_location_rules(ruleshash,showDetail,noheader=False):
+         for rule in ruleshash[rsc]:
+             constraint_id = rule.parentNode.getAttribute("id")
+             constrainthash[constraint_id].append(rule)
++            constraint_options[constraint_id] = []
++            if rule.parentNode.getAttribute("resource-discovery"):
++                constraint_options[constraint_id].append("resource-discovery=%s" % rule.parentNode.getAttribute("resource-discovery"))
+ 
+         for constraint_id in constrainthash.keys():
+-            print "    Constraint: " + constraint_id
++            if constraint_id in constraint_options and len(constraint_options[constraint_id]) > 0:
++                constraint_option_info = " (" + " ".join(constraint_options[constraint_id]) + ")"
++            else:
++                constraint_option_info = ""
++
++            print "    Constraint: " + constraint_id + constraint_option_info
+             for rule in constrainthash[constraint_id]:
+                 print rule_utils.ExportDetailed().get_string(
+                     rule, showDetail, "      "
+@@ -1006,9 +1015,20 @@ def location_rule(argv):
+ 
+     argv.pop(0) # pop "rule"
+ 
+-    options, rule_argv = rule_utils.parse_argv(argv, {"constraint-id": None,})
+-    cib, constraints = getCurrentConstraints(utils.get_cib_dom())
+-    lc = cib.createElement("rsc_location")
++    options, rule_argv = rule_utils.parse_argv(argv, {"constraint-id": None, "resource-discovery": None,})
++
++    # If resource-discovery is specified, we use it with the rsc_location
++    # element not the rule
++    if "resource-discovery" in options and options["resource-discovery"]:
++        utils.checkAndUpgradeCIB(2,2,0)
++        cib, constraints = getCurrentConstraints(utils.get_cib_dom())
++        lc = cib.createElement("rsc_location")
++        lc.setAttribute("resource-discovery", options.pop("resource-discovery"))
++    else:
++        cib, constraints = getCurrentConstraints(utils.get_cib_dom())
++        lc = cib.createElement("rsc_location")
++
++
+     constraints.appendChild(lc)
+     if options.get("constraint-id"):
+         id_valid, id_error = utils.validate_xml_id(
+diff --git a/pcs/pcs.8 b/pcs/pcs.8
+index 67f85d5..e2d0ffe 100644
+--- a/pcs/pcs.8
++++ b/pcs/pcs.8
+@@ -369,7 +369,7 @@ Create a location constraint on a resource to prefer the specified node and scor
+ location <resource id> avoids <node[=score]>...
+ Create a location constraint on a resource to avoid the specified node and score (default score: INFINITY)
+ .TP
+-location <resource id> rule [id=<rule id>] [role=master|slave] [constraint-id=<id>] [score=<score>|score-attribute=<attribute>] <expression>
++location <resource id> rule [id=<rule id>] [resource-discovery=<option>] [role=master|slave] [constraint-id=<id>] [score=<score>|score-attribute=<attribute>] <expression>
+ Creates a location rule on the specified resource where the expression looks like one of the following:
+ .br
+   defined|not_defined <attribute>
+@@ -388,7 +388,7 @@ Creates a location rule on the specified resource where the expression looks lik
+ .br
+   ( <expression> )
+ .br
+-where duration options and date spec options are: hours, monthdays, weekdays, yeardays, months, weeks, years, weekyears, moon. If score is ommited it defaults to INFINITY. If id is ommited one is generated from the resource id.
++where duration options and date spec options are: hours, monthdays, weekdays, yeardays, months, weeks, years, weekyears, moon. If score is omitted it defaults to INFINITY. If id is omitted one is generated from the resource id. If resource-discovery is omitted it defaults to 'always'.
+ .TP
+ location show [resources|nodes [node id|resource id]...] [\fB\-\-full\fR]
+ List all the current location constraints, if 'resources' is specified location constraints are displayed per resource (default), if 'nodes' is specified location constraints are displayed per node.  If specific nodes or resources are specified then we only show information about them.  If \fB\-\-full\fR is specified show the internal constraint id's as well.
+-- 
+2.1.0
+

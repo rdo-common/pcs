@@ -1,0 +1,78 @@
+--- pcs-0.9.137/pcs/pcs.py.acl-fix	2014-12-19 16:23:13.264292808 -0600
++++ pcs-0.9.137/pcs/pcs.py	2014-12-19 16:23:57.361816642 -0600
+@@ -54,7 +54,7 @@ def main(argv):
+                 pcs_short_options_with_args.append(prev_char)
+             prev_char = c
+ 
+-        pcs_long_options = ["local","start","all","clone","master","force","corosync_conf=", "defaults","debug","version","help","fullhelp","off","from=","to=", "name=", "wait", "group=","groups","full","enable","node=","nodesc","transport=", "addr0=","addr1=","bcast0=","bcast1=","mcast0=","mcast1=","mcastport0=","mcastport1=","ttl0=","ttl1=","rrpmode=", "broadcast0", "broadcast1","wait_for_all=","auto_tie_breaker=","last_man_standing=", "last_man_standing_window=","no-default-ops","ipv6","token=", "token_coefficient=", "consensus=", "miss_count_const=", "fail_recv_const=","join=", "disabled", "after=", "before=", "autocorrect", "interactive"]
++        pcs_long_options = ["local","start","all","clone","master","force","corosync_conf=", "defaults","debug","version","help","fullhelp","off","from=","to=", "name=", "wait", "group=","groups","full","enable","node=","nodesc","transport=", "addr0=","addr1=","bcast0=","bcast1=","mcast0=","mcast1=","mcastport0=","mcastport1=","ttl0=","ttl1=","rrpmode=", "broadcast0", "broadcast1","wait_for_all=","auto_tie_breaker=","last_man_standing=", "last_man_standing_window=","no-default-ops","ipv6","token=", "token_coefficient=", "consensus=", "miss_count_const=", "fail_recv_const=","join=", "disabled", "after=", "before=", "autocorrect", "interactive", "autodelete"]
+         # pull out negative number arguments and add them back after getopt
+         prev_arg = ""
+         for arg in argv:
+--- pcs-0.9.137/pcs/acl.py.acl-fix	2014-10-21 09:28:55.000000000 -0500
++++ pcs-0.9.137/pcs/acl.py	2014-12-19 16:23:13.264292808 -0600
+@@ -58,6 +58,8 @@ def acl_role(argv):
+         id_valid, id_error = utils.validate_xml_id(role_name, 'ACL role')
+         if not id_valid:
+             utils.err(id_error)
++        if utils.dom_get_element_with_id(dom, "acl_role", role_name):
++            utils.err("role %s already exists" % role_name)
+         if utils.does_id_exist(dom,role_name):
+             utils.err(role_name + " already exists")
+ 
+@@ -178,8 +180,13 @@ def acl_role(argv):
+ 
+         if not found:
+             utils.err("cannot find role: %s, assigned to user/group: %s" % (role_id, ug_id))
++
++        if "--autodelete" in utils.pcs_options:
++            if not ug.getElementsByTagName("role"):
++                ug.parentNode.removeChild(ug)
++
+         utils.replace_cib_configuration(dom)
+-        
++
+     else:
+         utils.err("Unknown pcs acl role command: '" + command + "' (try create or delete)")
+ 
+@@ -198,8 +205,14 @@ def acl_target(argv,group=False):
+     command = argv.pop(0)
+     tug_id = argv.pop(0)
+     if command == "create":
++        # pcsd parses the error message in order to determine whether the id is
++        # assigned to user/group or some other cib element
++        if group and utils.dom_get_element_with_id(dom, "acl_group", tug_id):
++            utils.err("group %s already exists" % tug_id)
++        if not group and utils.dom_get_element_with_id(dom, "acl_target", tug_id):
++            utils.err("user %s already exists" % tug_id)
+         if utils.does_id_exist(dom,tug_id):
+-            utils.err(tug_id + " already exists in cib")
++            utils.err(tug_id + " already exists")
+ 
+         if group:
+             element = dom.createElement("acl_group")
+--- pcs-0.9.137/pcsd/pcs.rb.acl-fix	2014-11-20 02:53:57.000000000 -0600
++++ pcs-0.9.137/pcsd/pcs.rb	2014-12-19 16:23:20.063219392 -0600
+@@ -189,8 +189,8 @@ def add_acl_usergroup(acl_role_id, user_
+     if retval == 0
+       return ""
+     end
+-    if stderr.join("\n").strip.downcase != "error: #{name.to_s.downcase} already exists in cib"
+-      return stderror.join("\n").strip
++    if not /^error: (user|group) #{name.to_s} already exists$/i.match(stderr.join("\n").strip)
++      return stderr.join("\n").strip
+     end
+   end
+   stdout, stderror, retval = run_cmd(
+@@ -211,7 +211,10 @@ def remove_acl_permission(acl_perm_id)
+ end
+ 
+ def remove_acl_usergroup(role_id, usergroup_id)
+-  stdout, stderror, retval = run_cmd(PCS, "acl", "role", "unassign", role_id.to_s, usergroup_id.to_s)
++  stdout, stderror, retval = run_cmd(
++    PCS, "acl", "role", "unassign", role_id.to_s, usergroup_id.to_s,
++    "--autodelete"
++  )
+   if retval != 0
+     return stderror.join("\n").chomp
+   end

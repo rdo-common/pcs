@@ -1,0 +1,30 @@
+From 5885c90faca010e3bceb3028638629fb69dca36e Mon Sep 17 00:00:00 2001
+From: Tomas Jelinek <tojeline@redhat.com>
+Date: Tue, 20 Jan 2015 10:23:01 +0100
+Subject: [PATCH] Keep cluster quorate during destruction as long as possible
+
+---
+ pcs/cluster.py | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/pcs/cluster.py b/pcs/cluster.py
+index e4829f1..038bc31 100644
+--- a/pcs/cluster.py
++++ b/pcs/cluster.py
+@@ -801,6 +801,13 @@ def disable_cluster_nodes(nodes):
+ 
+ def destroy_cluster(argv):
+     if len(argv) > 0:
++        # stop pacemaker and resources while cluster is still quorate
++        threads = dict()
++        for node in argv:
++            threads[node] = NodeStopPacemakerThread(node)
++        error_list = utils.run_node_threads(threads)
++        # proceed with destroy regardless of errors
++        # destroy will stop any remaining cluster daemons
+         threads = dict()
+         for node in argv:
+             threads[node] = NodeDestroyThread(node)
+-- 
+1.9.1
+
