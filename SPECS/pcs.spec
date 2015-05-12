@@ -16,7 +16,7 @@
 
 Name: pcs		
 Version: 0.9.137
-Release: 13%{?dist}
+Release: 13%{?dist}.2
 License: GPLv2
 URL: http://github.com/feist/pcs
 Group: System Environment/Base
@@ -37,6 +37,8 @@ Patch8: bz1180390-Stop-deleted-resource-before-removing-its-constraint.patch
 Patch9: bz1180506-stop-cluster-nodes-in-parallel.patch
 Patch10: bz1180506-Warn-if-nodes-stop-will-cause-a-loss-of-the-quorum.patch
 Patch11: bz1180506-3-Keep-cluster-quorate-during-destruction-as-long-as-possible.patch
+Patch12: bz1205848-Do-not-set-two_node-in-corosync-if-auto_tie_breaker-is-on.patch
+Patch13: secure-cookie.patch
 
 # NOTE: Source20 and Patch200+ belong to python-clufter
 
@@ -234,6 +236,14 @@ popd >/dev/null
 
 
 %changelog
+* Wed Apr 15 2015 Tomas Jelinek <tojeline@redhat.com> - 0.9.137-13.el7_1.2
+- Fixes issues with cookie signing in pcsd
+- Resolves: rhbz#1211567
+
+* Thu Mar 26 2015 Tomas Jelinek <tojeline@redhat.com> - 0.9.137-13.el7_1.1
+- Do not set two_nodes=1 in corosync.conf when auto_tie_breaker=1 is set
+- Resolves: rhbz#1205848
+
 * Tue Jan 20 2015 Tomas Jelinek <tojeline@redhat.com> - 0.9.137-13
 - Keep cluster quorate during destruction as long as possible
 - Resolves: rhbz#1180506
