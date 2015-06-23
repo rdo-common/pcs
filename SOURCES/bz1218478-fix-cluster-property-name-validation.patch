@@ -1,0 +1,28 @@
+From 289af7fd608a67d02494859302e465f19bb269bd Mon Sep 17 00:00:00 2001
+From: Tomas Jelinek <tojeline@redhat.com>
+Date: Thu, 7 May 2015 13:15:55 +0200
+Subject: [PATCH] fix cluster property name validation
+
+---
+ pcs/prop.py                 | 5 ++---
+ 2 files changed, 4 insertions(+), 5 deletions(-)
+
+diff --git a/pcs/prop.py b/pcs/prop.py
+index 3b1c15a..6d99032 100644
+--- a/pcs/prop.py
++++ b/pcs/prop.py
+@@ -32,9 +32,8 @@ def set_property(argv):
+         if "--node" in utils.pcs_options:
+             utils.set_node_attribute(args[0], args[1], utils.pcs_options["--node"])
+         elif ("--force" in utils.pcs_options) or utils.is_valid_property(args[0]):
+-            id_valid, id_error = utils.validate_xml_id(args[0], 'property name')
+-            if not id_valid:
+-                utils.err(id_error)
++            if not args[0]:
++                utils.err("property name cannot be empty")
+             utils.set_cib_property(args[0],args[1])
+         else:
+             utils.err("unknown cluster property: '%s', (use --force to override)" % args[0])
+-- 
+1.9.1
+
