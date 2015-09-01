@@ -16,7 +16,7 @@
 
 Name: pcs		
 Version: 0.9.137
-Release: 13%{?dist}.3
+Release: 13%{?dist}.4
 License: GPLv2
 URL: http://github.com/feist/pcs
 Group: System Environment/Base
@@ -40,6 +40,8 @@ Patch11: bz1180506-3-Keep-cluster-quorate-during-destruction-as-long-as-possible
 Patch12: bz1205848-Do-not-set-two_node-in-corosync-if-auto_tie_breaker-is-on.patch
 Patch13: secure-cookie.patch
 Patch14: bz1218478-fix-cluster-property-name-validation.patch
+Patch15: bz1253289-fixed-session-and-cookies-processing.patch
+Patch16: bz1253293-fixed-command-injection-vulnerability.patch
 
 # NOTE: Source20 and Patch200+ belong to python-clufter
 
@@ -237,6 +239,11 @@ popd >/dev/null
 
 
 %changelog
+* Fri Aug 14 2015 Tomas Jelinek <tojeline@redhat.com> - 0.9.137-13.el7_1.4
+- Fixed session and cookies processing
+- Fixed command injection vulnerability
+- Resolves: rhbz#1253289 rhbz#1253293
+
 * Wed Jun 10 2015 Tomas Jelinek <tojeline@redhat.com> - 0.9.137-13.el7_1.3
 - Fixed cluster property name validation
 - Resolves: rhbz#1229868

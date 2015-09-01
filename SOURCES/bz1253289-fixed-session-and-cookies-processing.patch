@@ -1,0 +1,185 @@
+From e338fc2e3eab278aa012f058472ba34b98ae80a3 Mon Sep 17 00:00:00 2001
+From: Tomas Jelinek <tojeline@redhat.com>
+Date: Fri, 31 Jul 2015 17:34:46 +0200
+Subject: [PATCH] fixed session and cookies processing
+
+---
+ pcsd/auth.rb   | 24 +++++++++++-------------
+ pcsd/pcs.rb    |  8 ++++----
+ pcsd/pcsd.rb   | 14 ++++++++++----
+ pcsd/remote.rb |  2 +-
+ 4 files changed, 26 insertions(+), 22 deletions(-)
+
+diff --git a/pcsd/auth.rb b/pcsd/auth.rb
+index 8953d60..05bfadf 100644
+--- a/pcsd/auth.rb
++++ b/pcsd/auth.rb
+@@ -3,9 +3,8 @@ require 'pp'
+ require 'securerandom'
+ require 'rpam'
+ 
+-class PCSAuth
+   # Ruby 1.8.7 doesn't implement SecureRandom.uuid
+-  def self.uuid
++  def pcsauth_uuid
+     if defined? SecureRandom.uuid
+       return SecureRandom.uuid
+     else
+@@ -16,7 +15,7 @@ class PCSAuth
+     end
+   end
+ 
+-  def self.validUser(username, password, generate_token = false, request = nil)
++  def pcsauth_validUser(username, password, generate_token = false, request = nil)
+     $logger.info("Attempting login by '#{username}'")
+     if not Rpam.auth(username,password, :service => "pcsd")
+       $logger.info("Failed login by '#{username}' (bad username or password)")
+@@ -37,7 +36,7 @@ class PCSAuth
+     $logger.info("Successful login by '#{username}'")
+ 
+     if generate_token
+-      token = PCSAuth.uuid
++      token = pcsauth_uuid
+       begin
+       	password_file = File.open($user_pass_file, File::RDWR|File::CREAT)
+ 	password_file.flock(File::LOCK_EX)
+@@ -57,7 +56,7 @@ class PCSAuth
+     return true
+   end
+ 
+-  def self.validToken(token)
++  def pcsauth_validToken(token)
+     begin
+       json = File.read($user_pass_file)
+       users = JSON.parse(json)
+@@ -73,10 +72,10 @@ class PCSAuth
+     return false
+   end
+ 
+-  def self.isLoggedIn(session, cookies)
+-    if username = validToken(cookies["token"])
+-      if username == "hacluster" and $cookies.key?(:CIB_user) and $cookies.key?(:CIB_user) != ""
+-        $session[:username] = $cookies[:CIB_user]
++  def pcsauth_isLoggedIn(session, cookies)
++    if username = pcsauth_validToken(cookies["token"])
++      if username == "hacluster" and cookies.key?('CIB_user') and cookies['CIB_user'] != ""
++        session[:username] = cookies['CIB_user']
+       end
+       return true
+     else
+@@ -85,11 +84,11 @@ class PCSAuth
+   end
+ 
+   # Always an admin until we implement groups
+-  def self.isAdmin(session)
++  def pcsauth_isAdmin(session)
+     true
+   end
+ 
+-  def self.createUser(username, password)
++  def pcsauth_createUser(username, password)
+     begin
+       json = File.read($user_pass_file)
+       users = JSON.parse(json)
+@@ -97,7 +96,7 @@ class PCSAuth
+       users = []
+     end
+ 
+-    token = PCSAuth.uuid
++    token = pcsauth_uuid
+ 
+     users.delete_if{|u| u["username"] == username}
+     users << {"username" => username, "password" => password, "token" => token}
+@@ -105,5 +104,4 @@ class PCSAuth
+       f.write(JSON.pretty_generate(users))
+     end
+   end
+-end
+ 
+diff --git a/pcsd/pcs.rb b/pcsd/pcs.rb
+index 3fad833..d8e27b3 100644
+--- a/pcsd/pcs.rb
++++ b/pcsd/pcs.rb
+@@ -306,7 +306,7 @@ def send_request_with_token(node, request, post=false, data={}, remote=true, raw
+       req.set_form_data(data)
+     end
+     cookies_to_send = [CGI::Cookie.new("name" => 'token', "value" => token).to_s]
+-    cookies_to_send << CGI::Cookie.new("name" =>  "CIB_user", "value" => $session[:username].to_s).to_s
++    cookies_to_send << CGI::Cookie.new("name" =>  "CIB_user", "value" => get_session()[:username].to_s).to_s
+     req.add_field("Cookie",cookies_to_send.join(";"))
+     myhttp = Net::HTTP.new(uri.host, uri.port)
+     myhttp.use_ssl = true
+@@ -623,10 +623,10 @@ def run_cmd(*args)
+   start = Time.now
+   out = ""
+   errout = ""
+-  if $session[:username] == "hacluster"
+-    ENV['CIB_user'] = $cookies[:CIB_user]
++  if get_session()[:username] == "hacluster"
++    ENV['CIB_user'] = get_cookies()[:CIB_user]
+   else
+-    ENV['CIB_user'] = $session[:username]
++    ENV['CIB_user'] = get_session()[:username]
+   end
+   $logger.debug("CIB USER: #{ENV['CIB_user'].to_s}")
+   status = Open4::popen4(*args) do |pid, stdin, stdout, stderr|
+diff --git a/pcsd/pcsd.rb b/pcsd/pcsd.rb
+index 5a0928a..2633360 100644
+--- a/pcsd/pcsd.rb
++++ b/pcsd/pcsd.rb
+@@ -49,8 +49,6 @@ also_reload 'auth.rb'
+ also_reload 'wizard.rb'
+ 
+ before do
+-  $session = session
+-  $cookies = cookies
+   if request.path != '/login' and not request.path == "/logout" and not request.path == '/remote/auth'
+     protected! 
+   end
+@@ -117,7 +115,7 @@ set :run, false
+ 
+ helpers do
+   def protected!
+-    if not PCSAuth.isLoggedIn(session, request.cookies)
++    if not pcsauth_isLoggedIn(session, request.cookies)
+       # If we're on /managec/<cluster_name>/main we redirect
+       match_expr = "/managec/(.*)/(.*)"
+       mymatch = request.path.match(match_expr)
+@@ -198,7 +196,7 @@ if not DISABLE_GUI
+   end
+ 
+   post '/login' do
+-    if PCSAuth.validUser(params['username'],params['password'])
++    if pcsauth_validUser(params['username'],params['password'])
+       session["username"] = params['username']
+       # Temporarily ignore pre_login_path until we come up with a list of valid
+       # paths to redirect to (to prevent status_all issues)
+@@ -741,4 +739,12 @@ helpers do
+   def h(text)
+     Rack::Utils.escape_html(text)
+   end
++
++  def get_session
++    session
++  end
++
++  def get_cookies
++    return cookies
++  end
+ end
+diff --git a/pcsd/remote.rb b/pcsd/remote.rb
+index b98e9a9..69142e4 100644
+--- a/pcsd/remote.rb
++++ b/pcsd/remote.rb
+@@ -628,7 +628,7 @@ def status_all(params, nodes = [])
+ end
+ 
+ def auth(params,request)
+-  token = PCSAuth.validUser(params['username'],params['password'], true, request)
++  token = pcsauth_validUser(params['username'],params['password'], true, request)
+   # If we authorized to this machine, attempt to authorize everywhere
+   node_list = []
+   if token and params["bidirectional"]
+-- 
+1.9.1
+
