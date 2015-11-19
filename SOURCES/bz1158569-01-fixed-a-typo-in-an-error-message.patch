@@ -1,0 +1,25 @@
+From 1307ccbf977dd4ca797a82312631afae03530fbb Mon Sep 17 00:00:00 2001
+From: Tomas Jelinek <tojeline@redhat.com>
+Date: Tue, 8 Sep 2015 09:19:10 +0200
+Subject: [PATCH] fixed a typo in an error message
+
+---
+ pcsd/remote.rb | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/pcsd/remote.rb b/pcsd/remote.rb
+index 06947ec..8a71000 100644
+--- a/pcsd/remote.rb
++++ b/pcsd/remote.rb
+@@ -2127,7 +2127,7 @@ def fix_auth_of_cluster(params, request, session)
+     tokens_data, true
+   )
+   if retval == 404
+-    return [400, "Old version of PCS/PCSD is runnig on cluster nodes. Fixing authentication is not supported. Use 'pcs cluster auth' command to authenticate the nodes."]
++    return [400, "Old version of PCS/PCSD is running on cluster nodes. Fixing authentication is not supported. Use 'pcs cluster auth' command to authenticate the nodes."]
+   elsif retval != 200
+     return [400, "Authentication failed."]
+   end
+-- 
+1.9.1
+

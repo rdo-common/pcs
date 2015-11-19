@@ -1,0 +1,735 @@
+From 85ea8bf4630bd3760ab935c24c7b78cdd255f55b Mon Sep 17 00:00:00 2001
+From: Ondrej Mular <omular@redhat.com>
+Date: Wed, 26 Aug 2015 10:55:57 +0200
+Subject: [PATCH] fix tree view of resources in web UI
+
+---
+ pcsd/cluster_entity.rb        |  15 +-
+ pcsd/pcs.rb                   |  30 ++-
+ pcsd/public/js/nodes-ember.js |  34 +++-
+ pcsd/remote.rb                |  12 +-
+ pcsd/views/nodes.erb          | 457 +++++++++++++++++++++---------------------
+ 5 files changed, 284 insertions(+), 264 deletions(-)
+
+diff --git a/pcsd/cluster_entity.rb b/pcsd/cluster_entity.rb
+index 182969f..b291937 100644
+--- a/pcsd/cluster_entity.rb
++++ b/pcsd/cluster_entity.rb
+@@ -895,7 +895,7 @@ module ClusterEntity
+   class Node < JSONable
+     attr_accessor :id, :error_list, :warning_list, :status, :quorum, :uptime,
+                   :name, :corosync, :pacemaker, :cman, :corosync_enabled,
+-                  :pacemaker_enabled, :pcsd_enabled, :attr, :fence_levels
++                  :pacemaker_enabled, :pcsd_enabled
+ 
+     def initialize
+       @id = nil
+@@ -911,8 +911,6 @@ module ClusterEntity
+       @corosync_enabled = false
+       @pacemaker_enabled = false
+       @pcsd_enabled = false
+-      @attr = ClusterEntity::NvSet.new
+-      @fence_levels = {}
+     end
+ 
+     def self.load_current_node(session, crm_dom=nil)
+@@ -923,7 +921,6 @@ module ClusterEntity
+       node.pacemaker_enabled = pacemaker_enabled?
+       node.cman = cman_running?
+       node.pcsd_enabled = pcsd_enabled?
+-      node.fence_levels = get_fence_levels(session)
+ 
+       node_online = (node.corosync and node.pacemaker)
+       node.status =  node_online ? 'online' : 'offline'
+@@ -939,16 +936,6 @@ module ClusterEntity
+           node.status = 'online'
+         end
+         node.quorum = !!crm_dom.elements['//current_dc[@with_quorum="true"]']
+-
+-        node_name = get_current_node_name()
+-        all_nodes_attr = get_node_attributes(session)
+-        if all_nodes_attr[node_name]
+-          all_nodes_attr[node_name].each { |pair|
+-            node.attr << ClusterEntity::NvPair.new(
+-              nil, pair[:key], pair[:value]
+-            )
+-          }
+-        end
+       else
+         node.status = 'offline'
+       end
+diff --git a/pcsd/pcs.rb b/pcsd/pcs.rb
+index 37f6b83..1fe9b99 100644
+--- a/pcsd/pcs.rb
++++ b/pcsd/pcs.rb
+@@ -1624,8 +1624,11 @@ def get_node_status(session, cib_dom)
+       :need_ring1_address => need_ring1_address?,
+       :is_cman_with_udpu_transport => is_cman_with_udpu_transport?,
+       :acls => get_acls(session),
+-      :username => session[:username]
++      :username => session[:username],
++      :fence_levels => get_fence_levels(session),
++      :node_attr => node_attrs_to_v2(get_node_attributes(session))
+   }
++
+   nodes = get_nodes_status()
+ 
+   known_nodes = []
+@@ -1742,14 +1745,31 @@ def get_cib_dom(session)
+   return nil
+ end
+ 
++def node_attrs_to_v2(node_attrs)
++  all_nodes_attr = {}
++  node_attrs.each { |node, attrs|
++    all_nodes_attr[node] = []
++    attrs.each { |attr|
++      all_nodes_attr[node] << {
++        :id => nil,
++        :name => attr[:key],
++        :value => attr[:value]
++      }
++    }
++  }
++  return all_nodes_attr
++end
++
+ def status_v1_to_v2(status)
+   new_status = status.select { |k,_|
+     [:cluster_name, :username, :is_cman_with_udpu_transport,
+      :need_ring1_address, :cluster_settings, :constraints, :groups,
+      :corosync_online, :corosync_offline, :pacemaker_online, :pacemaker_standby,
+-     :pacemaker_offline, :acls
++     :pacemaker_offline, :acls, :fence_levels
+     ].include?(k)
+   }
++  new_status[:node_attr] = node_attrs_to_v2(status[:node_attr])
++
+   resources = ClusterEntity::make_resources_tree(
+     ClusterEntity::get_primitives_from_status_v1(status[:resources])
+   )
+@@ -1764,15 +1784,9 @@ def status_v1_to_v2(status)
+     ].include?(k)
+   }
+ 
+-  node_attr = ClusterEntity::NvSet.new
+-  status[:node_attr].each { |k,v|
+-    node_attr << ClusterEntity::NvPair.new(nil, k, v)
+-  }
+   new_status[:node].update(
+     {
+       :id => status[:node_id],
+-      :attr => node_attr.to_status,
+-      :fence_levels => status[:fence_levels],
+       :quorum => nil,
+       :warning_list => [],
+       :error_list => [],
+diff --git a/pcsd/public/js/nodes-ember.js b/pcsd/public/js/nodes-ember.js
+index 46e34fa..1f60adc 100644
+--- a/pcsd/public/js/nodes-ember.js
++++ b/pcsd/public/js/nodes-ember.js
+@@ -170,7 +170,7 @@ Pcs = Ember.Application.createWithMixins({
+               tree_view_onclick(self.get('cur_resource').get('id'), true);
+             if (!fence_change && self.get('cur_fence'))
+               tree_view_select(self.get('cur_fence').get('id'));
+-            if (!resource_change && self.get('cur_fence'))
++            if (!resource_change && self.get('cur_resource'))
+               tree_view_select(self.get('cur_resource').get('id'));
+             Pcs.selectedNodeController.reset();
+             setup_node_links();
+@@ -932,6 +932,9 @@ Pcs.Setting = Ember.Object.extend({
+ Pcs.Clusternode = Ember.Object.extend({
+   name: null,
+   status: null,
++  status_unknown: function() {
++    return this.get('status') == "unknown";
++  }.property("status"),
+   status_val: function() {
+     if (this.warnings && this.warnings.length)
+       return get_status_value("warning");
+@@ -1013,6 +1016,10 @@ Pcs.Clusternode = Ember.Object.extend({
+ 	return "color:red";
+     }
+   }.property("up","pacemaker_standby"),
++  pacemaker_standby: null,
++  corosync_enabled: null,
++  pacemaker_enabled: null,
++  pcsd_enabled: null,
+   standby_style: function () {
+     if (this.pacemaker_standby)
+       return "display: none;";
+@@ -1043,7 +1050,12 @@ Pcs.Clusternode = Ember.Object.extend({
+     else
+       return "Disabled";
+   }.property("pcsd_enabled"),
+-  location_constraints: null
++  location_constraints: null,
++  node_attrs: [],
++  fence_levels: [],
++  pcsd: null,
++  corosync_daemon: null,
++  pacemaker_daemon: null,
+ });
+ 
+ Pcs.Aclrole = Ember.Object.extend({
+@@ -1509,8 +1521,8 @@ Pcs.nodesController = Ember.ArrayController.createWithMixins({
+   cur_node: null,
+   cur_node_attr: function () {
+     var nc = this;
+-    if (nc.cur_node && "node_attrs" in nc.cur_node) {
+-      return nc.cur_node.node_attrs;
++    if (nc.get('cur_node')) {
++      return nc.get('cur_node').get('node_attrs');
+     }
+     return [];
+   }.property("cur_node", "content.@each.node_attrs"),
+@@ -1599,7 +1611,7 @@ Pcs.nodesController = Ember.ArrayController.createWithMixins({
+         pacemaker_standby = false;
+       }
+ 
+-      if (node_obj["noresponse"] == true) {
++      if (node_obj["status"] == 'unknown') {
+         pcsd_daemon = false
+       } else {
+         pcsd_daemon = true
+@@ -1618,9 +1630,9 @@ Pcs.nodesController = Ember.ArrayController.createWithMixins({
+         up_status = false;
+       }
+ 
+-      var node_attr = {};
+-      if (node_obj["attr"]) {
+-        node_attr = node_obj["attr"];
++      var node_attr = [];
++      if (data["node_attr"] && data["node_attr"][node_id]) {
++        node_attr = data["node_attr"][node_id];
+       }
+ 
+       found = false;
+@@ -1646,7 +1658,8 @@ Pcs.nodesController = Ember.ArrayController.createWithMixins({
+           node.set("uptime", node_obj["uptime"]);
+           node.set("node_id", node_obj["id"]);
+           node.set("node_attrs", node_attr);
+-          node.set("fence_levels", node_obj["fence_levels"]);
++          node.set("fence_levels", data["fence_levels"]);
++          node.set("status", node_obj["status"]);
+         }
+       });
+ 
+@@ -1670,7 +1683,8 @@ Pcs.nodesController = Ember.ArrayController.createWithMixins({
+           uptime: node_obj["uptime"],
+           node_id: node_obj["id"],
+           node_attrs: node_attr,
+-          fence_levels: node_obj["fence_levels"]
++          fence_levels: data["fence_levels"],
++          status: node_obj["status"]
+         });
+       }
+       var pathname = window.location.pathname.split('/');
+diff --git a/pcsd/remote.rb b/pcsd/remote.rb
+index 22af38a..a40c1c7 100644
+--- a/pcsd/remote.rb
++++ b/pcsd/remote.rb
+@@ -1014,8 +1014,14 @@ def node_status(params, request, session)
+     status[:cluster_settings]
+ 
+   node_attr = {}
+-  node.attr.each { |v|
+-    node_attr[v.name.to_sym] = v.value
++  status[:node_attr].each { |node, attrs|
++    node_attr[node] = []
++    attrs.each { |attr|
++      node_attr[node] << {
++        :key => attr[:name],
++        :value => attr[:value]
++      }
++    }
+   }
+ 
+   old_status = {
+@@ -1038,7 +1044,7 @@ def node_status(params, request, session)
+     :cluster_settings => cluster_settings,
+     :node_id => node.id,
+     :node_attr => node_attr,
+-    :fence_levels => node.fence_levels,
++    :fence_levels => status[:fence_levels],
+     :need_ring1_address => status[:need_ring1_address],
+     :is_cman_with_udpu_transport => status[:is_cman_with_udpu_transport],
+     :acls => status[:acls],
+diff --git a/pcsd/views/nodes.erb b/pcsd/views/nodes.erb
+index b8ecf6d..19bba62 100644
+--- a/pcsd/views/nodes.erb
++++ b/pcsd/views/nodes.erb
+@@ -40,242 +40,241 @@
+ 	</table>
+       </td>
+       <td id="node_info" colspan=2>
+-	<div id="node_info_div" style="opacity: 0;">
+-	  <div id="test">
+-	    <div id="node_info_header">
+-	      <div id="node_info_header_title" class="node_info_header_title">Edit Node&nbsp;</div>
+-	      <div id="node_info_header_title_name">
+-{{Pcs.nodesController.cur_node.name}}
+-	    </div>
+-
+-	    </div>
+-
+-	    <div id="node_sub_info">
+-	      <table>
+-		<tr>
+-		  <td rowspan=2>
+-				<input disabled style="margin-right: 50px;" type="text" {{bind-attr value="Pcs.nodesController.cur_node.name"}} size="35" class="text_field">
+-		</td>
+-		  <td><div style="margin-right: 8px;" class="check sprites"></div></td>
+-		  <td>
+-		    <!--		      <tr><td>pacemaker</td><td><div style="float:left;margin-right:6px;" class="check sprites"></div><div id="pacemaker_status" style="float:left" class="status"></div></td></tr> -->
+-		    {{#if Pcs.nodesController.cur_node.pacemaker}}
+-		    <div id="pacemaker_online_status" class="status">
+-			Pacemaker Connected
+-		    {{else}}
+-		      {{#if Pcs.nodesController.cur_node.pacemaker_standby}}
+-		    <div id="pacemaker_online_status" class="status-standby">
+-			Pacemaker Standby
+-		      {{else}}
+-		    <div id="pacemaker_online_status" class="status-offline">
+-			Pacemaker Not Connected
+-		      {{/if}}
+-		    {{/if}}
+-		    </div>
+-		  </td>
+-		</tr>
+-		<tr>
+-		  <td><div style="margin-right: 8px;" class="check sprites"></div></td>
+-		  <td>
+-		    {{#if Pcs.nodesController.cur_node.corosync}}
+-		    <div id="corosync_online_status" class="status">
+-			Corosync Connected
+-		    {{else}}
+-		    <div id="corosync_online_status" class="status-offline">
+-			Corosync Not Connected
+-		    {{/if}}
+-		    </div>
+-		  </td>
+-		</tr>
+-	      </table>
+-	    </div>
+-
+-	    <div id="node_options_buttons">
+-	      <div id="node_start" class="link">
+-		<div class="restart sprites" style="float: left"></div>
+-		&nbsp;Start
+-	      </div>
+-	      <div id="node_stop" class="link">
+-		<div class="cancel sprites" style="float: left"></div>
+-		&nbsp;Stop
+-	      </div>
+-	      <div id="node_restart" class="link">
+-		<div class="restart sprites" style="float: left"></div>
+-		&nbsp;Restart
+-	      </div>
+-	      <div id="node_unstandby" class="link" {{bind-attr style="Pcs.nodesController.cur_node.unstandby_style"}}>
+-		<div class="unstandby sprites" style="float: left"></div>
+-		&nbsp;Unstandby
+-	      </div>
+-	      <div id="node_standby" class="link" {{bind-attr style="Pcs.nodesController.cur_node.standby_style"}}>
+-		<div class="standby sprites" style="float: left"></div>
+-		&nbsp;Standby
+-	      </div>
+-	      <div class="configure sprites" style="float: left"></div>
+-	      <div class="link"><a href="#/fencedevices" onclick="select_menu('FENCE DEVICES');return true;">Configure Fencing</a></div>
+-	    </div>
+-
+-	    <div id="node_details">
+-	      <table><tr>
+-		  <td><div class="reg">Node ID:</div></td>
+-		  <td><div class="bold">{{Pcs.nodesController.cur_node.node_id}}</div></td>
+-		  <td><div class="reg"> Uptime:</div></td>
+-		  <td><div class="bold" id="uptime">{{Pcs.nodesController.cur_node.uptime}}</div></td>
+-		</tr>
+-	      </table>
+-	    </div>
++        <div id="node_info_div" style="opacity: 0;">
++          <div id="test">
++            <div id="node_info_header">
++              <div id="node_info_header_title" class="node_info_header_title">Edit Node&nbsp;</div>
++              <div id="node_info_header_title_name">
++                {{Pcs.nodesController.cur_node.name}}
++              </div>
++            </div>
+ 
+-	    <table style="float:left;margin-top:25px">
+-	      <tr><td class="datatable_header">Cluster Daemons</td></tr>
+-	      <tr><td>
+-		  <div id="clusterdaemons">
+-		    <table class="datatable">
+-		      <tr><th>NAME</th><th>STATUS</th></tr>
+-		      <tr><td>pacemaker</td><td><div style="float:left;margin-right:6px;" class="check sprites"></div>
+-{{#if Pcs.nodesController.cur_node.pacemaker_daemon}}
+-<span id="pacemaker_status" style="float:left" class="status">Running ({{Pcs.nodesController.cur_node.pacemaker_startup}})</span>
+-{{else}}
+-{{#if Pcs.nodesController.cur_node.pcsd}}
+-<span id="pacemaker_status" style="float:left" class="status-offline">Stopped ({{Pcs.nodesController.cur_node.pacemaker_startup}})</span>
+-{{else}}
+-<span id="pacemaker_status" style="float:left" class="status-unknown">Unknown ({{Pcs.nodesController.cur_node.pacemaker_startup}})</span>
+-{{/if}}
+-{{/if}}
+-</td></tr>
+-		      <tr><td>corosync</td><td><div style="float:left;margin-right:6px;" class="check sprites"></div>
+-{{#if Pcs.nodesController.cur_node.corosync_daemon}}
+-<span id="corosync_status" style="float:left" class="status">Running ({{Pcs.nodesController.cur_node.corosync_startup}})</span>
+-{{else}}
+-{{#if Pcs.nodesController.cur_node.pcsd}}
+-<span id="corosync_status" style="float:left" class="status-offline">Stopped ({{Pcs.nodesController.cur_node.corosync_startup}})</span>
+-{{else}}
+-<span id="corosync_status" style="float:left" class="status-unknown">Unknown ({{Pcs.nodesController.cur_node.corosync_startup}})</span>
+-{{/if}}
+-{{/if}}
+-</td></tr>
+-		      <tr><td>pcsd</td><td><div style="float:left;margin-right:6px;" class="check sprites"></div>
+-{{#if Pcs.nodesController.cur_node.pcsd}}
+-<span id="pcsd_status" style="float:left" class="status">Running ({{Pcs.nodesController.cur_node.pcsd_startup}})</span>
+-{{else}}
+-  {{#if Pcs.nodesController.cur_node.authorized}}
+-  <span id="pcsd_status" style="float:left" class="status-offline">Stopped ({{Pcs.nodesController.cur_node.pcsd_startup}})</span>
+-  {{else}}
+-  <span id="pcsd_status" style="float:left" class="status-offline">Running (not Authorized) ({{Pcs.nodesController.cur_node.pcsd_startup}})</span>
+-  {{/if}}
+-{{/if}}
+-</td></tr>
+-		    </table>
+-		  </div>
+-		</td>
+-	      </tr>
+-	    </table>
+-	    <table style="clear:left;float:left;margin-top:25px;">
+-	      <tr><td class="datatable_header">Running Resources</td></tr>
+-	      <tr><td>
+-		  <div id="resources_running">
+-		    <table class="datatable">
+-		      <tr><th>NAME</th></tr>
+-		      {{#if Pcs.nodesController.cur_node.running_resources}}
+-		        {{#each res in Pcs.nodesController.cur_node.running_resources}}
+-			<tr><td>
+-			    {{#unless res.stonith}}
+-			      {{#link-to 'Resources.index' res}}{{res.name}} ({{res.res_type}}){{/link-to}}
+-			    {{/unless}}
+-			</td></tr>
+-		        {{/each}}
+-		      {{else}}
+-			<tr><td style="color: gray;">NONE</td></tr>
+-		      {{/if}}
+-		    </table>
+-		  </div>
+-		</td>
+-	      </tr>
+-	    </table>
+-	    <table style="clear:left;float:left;margin-top:25px;">
+-	      <tr><td class="datatable_header">Resource Location Preferences</td></tr>
+-	      <tr><td>
+-		  <div id="locationdep">
+-		    <table class="datatable">
+-		      <tr><th>NAME</th><th>Score</th></tr>
+-		    {{#if Pcs.nodesController.cur_node.location_constraints}}
+-		    {{#each Pcs.nodesController.cur_node.location_constraints}}
+-		      <tr><td>{{rsc}}</td><td>{{score}}</td><td></td></tr>
+-		    {{/each}}
+-		    {{else}}
+-			<tr><td style="color: gray;">NONE</td><td></td></tr>
+-		    {{/if}}
+-		    </table>
+-		  </div>
+-		</td>
+-	      </tr>
+-	    </table>
+-        <table style="clear:left;float:left;margin-top:25px;">
+-          <tr><td onclick="show_hide_constraints(this)" class="datatable_header hover-pointer">Node Attributes ({{#if Pcs.nodesController.cur_node_attr.length}}{{Pcs.nodesController.cur_node_attr.length}}{{else}}0{{/if}})<span style="" class="downarrow sprites"></span><span style="display: none;" class="rightarrow sprites"></span></td></tr>
+-          <tr><td>
+-            <div id="node_attributes">
+-              <table class="datatable">
+-                <tr><th>Attribute</th><th>Value</th><th>Remove</th></tr>
+-                {{#each Pcs.nodesController.cur_node_attr}}
+-                <tr><td>{{this.name}}</td>
+-                  <td>{{this.value}}</td>
+-                  <td {{bind-attr node_attr_key="this.name"}} {{bind-attr node_attr_parent="this.parent"}} style="text-align:center">
+-                  <a onclick="remove_node_attr($(this).parent());return false;" href="#" class="remove">X</a>
++            <div id="node_sub_info">
++              <table>
++                <tr>
++                  <td rowspan=2>
++                    <input disabled style="margin-right: 50px;" type="text" {{bind-attr value="Pcs.nodesController.cur_node.name"}} size="35" class="text_field">
++                  </td>
++                  <td><div style="margin-right: 8px;" class="check sprites"></div></td>
++                  <td>
++                    {{#if Pcs.nodesController.cur_node.pacemaker}}
++                    <div id="pacemaker_online_status" class="status">
++                      Pacemaker Connected
++                    </div>
++                    {{else}}
++                    {{#if Pcs.nodesController.cur_node.pacemaker_standby}}
++                    <div id="pacemaker_online_status" class="status-standby">
++                      Pacemaker Standby
++                    </div>
++                    {{else}}
++                    <div id="pacemaker_online_status" class="status-offline">
++                      Pacemaker Not Connected
++                    </div>
++                    {{/if}}
++                    {{/if}}
+                   </td>
+                 </tr>
+-                {{/each}}
+-                {{#unless Pcs.nodesController.cur_node_attr}}
+-                <tr><td style="color: gray;">NONE</td><td></td><td></td></tr>
+-                {{/unless}}
+-                <tr id="new_node_attr_col">
+-                  <td><input type="text" name="new_node_attr_key" size="20"></td>
+-                  <td><input type="text" name="new_node_attr_value" size="20"></td>
+-                  <td><button type="button" onclick="add_node_attr('#new_node_attr_col');" name="add">Add</button></td>
++                <tr>
++                  <td><div style="margin-right: 8px;" class="check sprites"></div></td>
++                  <td>
++                    {{#if Pcs.nodesController.cur_node.corosync}}
++                    <div id="corosync_online_status" class="status">
++                      Corosync Connected
++                    </div>
++                    {{else}}
++                    <div id="corosync_online_status" class="status-offline">
++                      Corosync Not Connected
++                    </div>
++                    {{/if}}
++                  </td>
+                 </tr>
++              </table>
++            </div>
++
++            <div id="node_options_buttons">
++              <div id="node_start" class="link">
++                <div class="restart sprites" style="float: left"></div>
++                &nbsp;Start
++              </div>
++              <div id="node_stop" class="link">
++                <div class="cancel sprites" style="float: left"></div>
++                &nbsp;Stop
++              </div>
++              <div id="node_restart" class="link">
++                <div class="restart sprites" style="float: left"></div>
++                &nbsp;Restart
++              </div>
++              <div id="node_unstandby" class="link" {{bind-attr style="Pcs.nodesController.cur_node.unstandby_style"}}>
++                <div class="unstandby sprites" style="float: left"></div>
++                &nbsp;Unstandby
++              </div>
++              <div id="node_standby" class="link" {{bind-attr style="Pcs.nodesController.cur_node.standby_style"}}>
++                <div class="standby sprites" style="float: left"></div>
++                &nbsp;Standby
++              </div>
++              <div class="configure sprites" style="float: left"></div>
++              <div class="link"><a href="#/fencedevices" onclick="select_menu('FENCE DEVICES');return true;">Configure Fencing</a></div>
++            </div>
+ 
++            <div id="node_details">
++              {{#unless Pcs.nodesController.cur_node.status_unknown}}
++              <table><tr>
++                <td><div class="reg">Node ID:</div></td>
++                <td><div class="bold">{{Pcs.nodesController.cur_node.node_id}}</div></td>
++                <td><div class="reg"> Uptime:</div></td>
++                <td><div class="bold" id="uptime">{{Pcs.nodesController.cur_node.uptime}}</div></td>
++              </tr>
+               </table>
++              {{/unless}}
+             </div>
+-          </td>
+-          </tr>
+-        </table>
+-       <table style="clear:left;float:left;margin-top:25px;">
+-         <tr><td onclick="show_hide_constraints(this)" class="datatable_header hover-pointer">Fence Levels ({{#if Pcs.nodesController.cur_node_fence_levels.length}}{{Pcs.nodesController.cur_node_fence_levels.length}}{{else}}0{{/if}})<span style="" class="downarrow sprites"></span><span style="display: none;" class="rightarrow sprites"></span></td></tr>
+-         <tr><td>
+-             <div id="fencelevels">
+-               <table class="datatable">
+-                 <tr><th>Level</th><th>Fence Devices</th><th>Remove</th></tr>
+-                 {{#each Pcs.nodesController.cur_node_fence_levels}}
+-                 <tr>
+-                   <td>{{this.level}}</td>
+-                   <td>{{this.devices}}</td>
+-                   <td {{bind-attr fence_level="this.level" fence_devices="this.devices"}}  style="text-align:center">
+-                     <a onclick="add_remove_fence_level($(this).parent(),true);return false;" href="#" class="remove">X</a>
+-                   </td>
+-                 </tr>
+-                 {{/each}}
+-                 {{#unless Pcs.nodesController.cur_node_fence_levels}}
+-                 <tr><td style="color: gray;">NONE</td><td></td><td></td></tr>
+-                 {{/unless}}
+-                 <tr id="new_fence_level_col">
+-                   <td><input type="text" name="new_level_level" size="2"></td>
+-                   <td><select name="new_level_value">
+-                       <option></option>
+-                       {{#each Pcs.resourcesContainer.fence_list}}
+-                         <option {{bind-attr value="this.id"}}>{{this.id}}</option>
+-                       {{/each }}
+-                   </select></td>
+-                   <td><button type="button" onclick="add_remove_fence_level($(this).parent());" name="add">Add</button></td>
+-                 </tr>
+-               </table>
+-             </div>
+-           </td>
+-         </tr>
+-       </table>
+-     </td>
+-   </tr>
+-      </div>
+-  </div>
+-  </td>
+-</tr>
++
++            <table style="float:left;margin-top:25px">
++              <tr><td class="datatable_header">Cluster Daemons</td></tr>
++              <tr><td>
++                <div id="clusterdaemons">
++                  <table class="datatable">
++                    <tr><th>NAME</th><th>STATUS</th></tr>
++                    <tr><td>pacemaker</td><td><div style="float:left;margin-right:6px;" class="check sprites"></div>
++                      {{#if Pcs.nodesController.cur_node.pacemaker_daemon}}
++                      <span id="pacemaker_status" style="float:left" class="status">Running ({{Pcs.nodesController.cur_node.pacemaker_startup}})</span>
++                      {{else}}
++                      {{#if Pcs.nodesController.cur_node.pcsd}}
++                      <span id="pacemaker_status" style="float:left" class="status-offline">Stopped ({{Pcs.nodesController.cur_node.pacemaker_startup}})</span>
++                      {{else}}
++                      <span id="pacemaker_status" style="float:left" class="status-unknown">Unknown ({{Pcs.nodesController.cur_node.pacemaker_startup}})</span>
++                      {{/if}}
++                      {{/if}}
++                    </td></tr>
++                    <tr><td>corosync</td><td><div style="float:left;margin-right:6px;" class="check sprites"></div>
++                      {{#if Pcs.nodesController.cur_node.corosync_daemon}}
++                      <span id="corosync_status" style="float:left" class="status">Running ({{Pcs.nodesController.cur_node.corosync_startup}})</span>
++                      {{else}}
++                      {{#if Pcs.nodesController.cur_node.pcsd}}
++                      <span id="corosync_status" style="float:left" class="status-offline">Stopped ({{Pcs.nodesController.cur_node.corosync_startup}})</span>
++                      {{else}}
++                      <span id="corosync_status" style="float:left" class="status-unknown">Unknown ({{Pcs.nodesController.cur_node.corosync_startup}})</span>
++                      {{/if}}
++                      {{/if}}
++                    </td></tr>
++                    <tr><td>pcsd</td><td><div style="float:left;margin-right:6px;" class="check sprites"></div>
++                      {{#if Pcs.nodesController.cur_node.pcsd}}
++                      <span id="pcsd_status" style="float:left" class="status">Running ({{Pcs.nodesController.cur_node.pcsd_startup}})</span>
++                      {{else}}
++                      {{#if Pcs.nodesController.cur_node.authorized}}
++                      <span id="pcsd_status" style="float:left" class="status-offline">Stopped ({{Pcs.nodesController.cur_node.pcsd_startup}})</span>
++                      {{else}}
++                      <span id="pcsd_status" style="float:left" class="status-offline">Running (not Authorized) ({{Pcs.nodesController.cur_node.pcsd_startup}})</span>
++                      {{/if}}
++                      {{/if}}
++                    </td></tr>
++                  </table>
++                </div>
++              </td>
++              </tr>
++            </table>
++            <table style="clear:left;float:left;margin-top:25px;">
++              <tr><td class="datatable_header">Running Resources</td></tr>
++              <tr><td>
++                <div id="resources_running">
++                  <table class="datatable">
++                    <tr><th>NAME</th></tr>
++                    {{#if Pcs.nodesController.cur_node.running_resources}}
++                    {{#each res in Pcs.nodesController.cur_node.running_resources}}
++                    <tr><td>
++                      {{#unless res.stonith}}
++                      {{#link-to 'Resources.index' res}}{{res.name}} ({{res.res_type}}){{/link-to}}
++                      {{/unless}}
++                    </td></tr>
++                    {{/each}}
++                    {{else}}
++                    <tr><td style="color: gray;">NONE</td></tr>
++                    {{/if}}
++                  </table>
++                </div>
++              </td>
++              </tr>
++            </table>
++            <table style="clear:left;float:left;margin-top:25px;">
++              <tr><td class="datatable_header">Resource Location Preferences</td></tr>
++              <tr><td>
++                <div id="locationdep">
++                  <table class="datatable">
++                    <tr><th>NAME</th><th>Score</th></tr>
++                    {{#if Pcs.nodesController.cur_node.location_constraints}}
++                    {{#each Pcs.nodesController.cur_node.location_constraints}}
++                    <tr><td>{{rsc}}</td><td>{{score}}</td><td></td></tr>
++                    {{/each}}
++                    {{else}}
++                    <tr><td style="color: gray;">NONE</td><td></td></tr>
++                    {{/if}}
++                  </table>
++                </div>
++              </td>
++              </tr>
++            </table>
++            <table style="clear:left;float:left;margin-top:25px;">
++              <tr><td onclick="show_hide_constraints(this)" class="datatable_header hover-pointer">Node Attributes ({{#if Pcs.nodesController.cur_node_attr.length}}{{Pcs.nodesController.cur_node_attr.length}}{{else}}0{{/if}})<span style="" class="downarrow sprites"></span><span style="display: none;" class="rightarrow sprites"></span></td></tr>
++              <tr><td>
++                <div id="node_attributes">
++                  <table class="datatable">
++                    <tr><th>Attribute</th><th>Value</th><th>Remove</th></tr>
++                    {{#each attr in Pcs.nodesController.cur_node_attr}}
++                    <tr><td>{{attr.name}}</td>
++                      <td>{{attr.value}}</td>
++                      <td {{bind-attr node_attr_key=attr.name}} {{bind-attr node_attr_parent=attr.parent}} style="text-align:center">
++                        <a onclick="remove_node_attr($(this).parent());return false;" href="#" class="remove">X</a>
++                      </td>
++                    </tr>
++                    {{else}}
++                    <tr><td style="color: gray;">NONE</td><td></td><td></td></tr>
++                    {{/each}}
++                    <tr id="new_node_attr_col">
++                      <td><input type="text" name="new_node_attr_key" size="20"></td>
++                      <td><input type="text" name="new_node_attr_value" size="20"></td>
++                      <td><button type="button" onclick="add_node_attr('#new_node_attr_col');" name="add">Add</button></td>
++                    </tr>
++                  </table>
++                </div>
++              </td>
++              </tr>
++            </table>
++            <table style="clear:left;float:left;margin-top:25px;">
++              <tr><td onclick="show_hide_constraints(this)" class="datatable_header hover-pointer">Fence Levels ({{#if Pcs.nodesController.cur_node_fence_levels.length}}{{Pcs.nodesController.cur_node_fence_levels.length}}{{else}}0{{/if}})<span style="" class="downarrow sprites"></span><span style="display: none;" class="rightarrow sprites"></span></td></tr>
++              <tr><td>
++                <div id="fencelevels">
++                  <table class="datatable">
++                    <tr><th>Level</th><th>Fence Devices</th><th>Remove</th></tr>
++                    {{#each Pcs.nodesController.cur_node_fence_levels}}
++                    <tr>
++                      <td>{{this.level}}</td>
++                      <td>{{this.devices}}</td>
++                      <td {{bind-attr fence_level="this.level" fence_devices="this.devices"}}  style="text-align:center">
++                        <a onclick="add_remove_fence_level($(this).parent(),true);return false;" href="#" class="remove">X</a>
++                      </td>
++                    </tr>
++                    {{/each}}
++                    {{#unless Pcs.nodesController.cur_node_fence_levels}}
++                    <tr><td style="color: gray;">NONE</td><td></td><td></td></tr>
++                    {{/unless}}
++                    <tr id="new_fence_level_col">
++                      <td><input type="text" name="new_level_level" size="2"></td>
++                      <td><select name="new_level_value">
++                        <option></option>
++                        {{#each Pcs.resourcesContainer.fence_list}}
++                        <option {{bind-attr value="this.id"}}>{{this.id}}</option>
++                        {{/each }}
++                      </select></td>
++                      <td><button type="button" onclick="add_remove_fence_level($(this).parent());" name="add">Add</button></td>
++                    </tr>
++                  </table>
++                </div>
++              </td>
++              </tr>
++            </table>
++    </div>
++    </div>
++    </td>
++    </tr>
+ <%= erb :_configure %>
+ <%= erb :_acls %>
+ <%= erb :_wizards %>
+-- 
+1.9.1
+

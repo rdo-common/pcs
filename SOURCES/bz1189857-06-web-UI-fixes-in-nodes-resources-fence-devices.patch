@@ -1,0 +1,228 @@
+From 7c12321d187ce5919ea5e443612321b404be8cab Mon Sep 17 00:00:00 2001
+From: Ondrej Mular <omular@redhat.com>
+Date: Tue, 15 Sep 2015 11:03:59 +0200
+Subject: [PATCH] web UI: fixes in nodes, resources, fence devices
+
+- fix creating disabled resource
+- add sorting for cluster list, resource list and fence device list
+- hide resource (fence device) details when there is no resource (fence device)
+- in resource list color of resource name depends on its status
+- fix group selector
+- disabled autocorrect for ordering set constraints
+- fix status detection of master/slave resources
+---
+ pcsd/cluster_entity.rb        |  2 +-
+ pcsd/pcsd.rb                  |  2 +-
+ pcsd/public/css/style.css     |  8 +++++++
+ pcsd/public/js/nodes-ember.js | 56 +++++++++++++++++++++++++++++++------------
+ pcsd/public/js/pcsd.js        |  5 +++-
+ pcsd/views/main.erb           |  4 +++-
+ 6 files changed, 58 insertions(+), 19 deletions(-)
+
+diff --git a/pcsd/cluster_entity.rb b/pcsd/cluster_entity.rb
+index b5d2719..8f29a40 100644
+--- a/pcsd/cluster_entity.rb
++++ b/pcsd/cluster_entity.rb
+@@ -914,7 +914,7 @@ module ClusterEntity
+         end
+         @masters, @slaves = get_masters_slaves(primitive_list)
+         if (@masters.empty? and
+-          @member.status != ClusterEntity::ResourceStatus.new(:disabled)
++          @member.status == ClusterEntity::ResourceStatus.new(:running)
+         )
+           @status = ClusterEntity::ResourceStatus.new(:partially_running)
+         end
+diff --git a/pcsd/pcsd.rb b/pcsd/pcsd.rb
+index 9a07ee8..b7c2a49 100644
+--- a/pcsd/pcsd.rb
++++ b/pcsd/pcsd.rb
+@@ -178,7 +178,7 @@ helpers do
+         param_line << "#{myparam}=#{val}"
+       end
+       if param == "disabled"
+-        meta_options << "meta target-role=Stopped"
++        meta_options << 'meta' << 'target-role=Stopped'
+       end
+     }
+     return param_line + meta_options
+diff --git a/pcsd/public/css/style.css b/pcsd/public/css/style.css
+index a3f6638..1c003bd 100644
+--- a/pcsd/public/css/style.css
++++ b/pcsd/public/css/style.css
+@@ -778,3 +778,11 @@ li.menuheader {
+ .issue_table {
+   margin-top: 1.5em;
+ }
++
++.status-error {
++  color: red;
++}
++
++.status-warning {
++  color: #ff6600;
++}
+diff --git a/pcsd/public/js/nodes-ember.js b/pcsd/public/js/nodes-ember.js
+index bbeed55..1e00a94 100644
+--- a/pcsd/public/js/nodes-ember.js
++++ b/pcsd/public/js/nodes-ember.js
+@@ -147,8 +147,10 @@ Pcs = Ember.Application.createWithMixins({
+           } else {
+             if (self.get('fence_list').length > 0) {
+               cur_fence = self.get('fence_list')[0];
+-              fence_change = true;
++            } else {
++              cur_fence = null;
+             }
++            fence_change = true;
+           }
+ 
+           if (cur_resource && cur_resource.get('id') in resource_map) {
+@@ -158,22 +160,28 @@ Pcs = Ember.Application.createWithMixins({
+           } else {
+             if (self.get('resource_list').length > 0) {
+               cur_resource = self.get('resource_list')[0];
+-              resource_change = true;
++            } else {
++              cur_resource = null;
+             }
++            resource_change = true;
+           }
+ 
+           self.set('cur_fence', cur_fence);
+           self.set('cur_resource', cur_resource);
+ 
+           Ember.run.scheduleOnce('afterRender', Pcs, function () {
+-            if (fence_change)
+-              tree_view_onclick(self.get('cur_fence').get('id'), true);
+-            if (resource_change)
+-              tree_view_onclick(self.get('cur_resource').get('id'), true);
+-            if (!fence_change && self.get('cur_fence'))
+-              tree_view_select(self.get('cur_fence').get('id'));
+-            if (!resource_change && self.get('cur_resource'))
+-              tree_view_select(self.get('cur_resource').get('id'));
++            if (self.get('cur_fence')) {
++              if (fence_change)
++                tree_view_onclick(self.get('cur_fence').get('id'), true);
++              else
++                tree_view_select(self.get('cur_fence').get('id'));
++            }
++            if (self.get('cur_resource')) {
++              if (resource_change)
++                tree_view_onclick(self.get('cur_resource').get('id'), true);
++              else
++                tree_view_select(self.get('cur_resource').get('id'));
++            }
+             Pcs.selectedNodeController.reset();
+             disable_checkbox_clicks();
+           });
+@@ -546,6 +554,11 @@ Pcs.resourcesContainer = Ember.Object.create({
+         }
+       });
+     });
++    $.each(resource_map, function(resource_id, resource_obj) {
++      resource_obj.set('group_list', self.get('group_list'));
++    });
++    self.set('resource_list', Ember.copy(self.get('resource_list')).sort(function(a,b){return a.get('id').localeCompare(b.get('id'))}));
++    self.set('fence_list', Ember.copy(self.get('fence_list')).sort(function(a,b){return a.get('id').localeCompare(b.get('id'))}));
+   }
+ });
+ 
+@@ -565,6 +578,7 @@ Pcs.ResourceObj = Ember.Object.extend({
+   disabled: false,
+   error_list: [],
+   warning_list: [],
++  group_list: [],
+   get_group_id: function() {
+     var self = this;
+     var p = self.get('parent');
+@@ -577,7 +591,7 @@ Pcs.ResourceObj = Ember.Object.extend({
+     var self = this;
+     var cur_group = self.get('get_group_id');
+     var html = '<select>\n<option value="">None</option>\n';
+-    $.each(Pcs.resourcesContainer.get('group_list'), function(_, group) {
++    $.each(self.get('group_list'), function(_, group) {
+       html += '<option value="' + group + '"';
+       if (cur_group === group) {
+         html += 'selected';
+@@ -586,7 +600,7 @@ Pcs.ResourceObj = Ember.Object.extend({
+     });
+     html += '</select><input type="button" value="Change group" onclick="resource_change_group(curResource(), $(this).prev().prop(\'value\'));">';
+     return html;
+-  }.property('Pcs.resourceContainer.group_list', 'get_group_id'),
++  }.property('group_list', 'get_group_id'),
+   status: "unknown",
+   class_type: null, // property to determine type of the resource
+   resource_type: function() { // this property is just for displaying resource type in GUI
+@@ -641,6 +655,17 @@ Pcs.ResourceObj = Ember.Object.extend({
+     }
+     return out;
+   }.property("error_list.@each", "warning_list.@each"),
++  span_class: function() {
++    switch (this.get("status_val")) {
++      case get_status_value("failed"):
++        return "status-error";
++      case get_status_value("warning"):
++      case get_status_value("disabled"):
++        return "status-warning";
++      default:
++        return "";
++    }
++  }.property("status_val"),
+ 
+   location_constraints: [],
+   ordering_constraints: [],
+@@ -1265,9 +1290,9 @@ Pcs.Cluster = Ember.Object.extend({
+ 
+ Pcs.clusterController = Ember.Object.create({
+   cluster_list: Ember.ArrayController.create({
+-    content: Ember.A(), sortProperties: ['status', 'name'],
+-    sortAscending: true,
+-    sortFunction: function(a,b){return status_comparator(a,b);}
++    content: Ember.A(),
++    sortProperties: ['name'],
++    sortAscending: true
+   }),
+   cur_cluster: null,
+   show_all_nodes: false,
+@@ -1779,6 +1804,7 @@ Pcs.nodesController = Ember.ArrayController.createWithMixins({
+     $.each(nodesToRemove, function(k,v) {
+       self.content.removeObject(v);
+     });
++    self.set('content', Ember.copy(self.get('content').sort(function(a,b){return a.get('name').localeCompare(b.get('name'))})));
+   }
+ });
+ 
+diff --git a/pcsd/public/js/pcsd.js b/pcsd/public/js/pcsd.js
+index 84db292..23fd316 100644
+--- a/pcsd/public/js/pcsd.js
++++ b/pcsd/public/js/pcsd.js
+@@ -1526,7 +1526,10 @@ function add_constraint(parent_id, c_type, force) {
+ }
+ 
+ function add_constraint_set(parent_id, c_type, force) {
+-  var data = {'resources': []};
++  var data = {
++    resources: [],
++    disable_autocorrect: true
++  };
+   $(parent_id + " input[name='resource_ids[]']").each(function(index, element) {
+     var resources = element.value.trim();
+     if (resources.length > 0) {
+diff --git a/pcsd/views/main.erb b/pcsd/views/main.erb
+index b24c74a..e7e611d 100644
+--- a/pcsd/views/main.erb
++++ b/pcsd/views/main.erb
+@@ -105,7 +105,9 @@
+           <input type="checkbox" onchange="tree_view_checkbox_onchange(this)">
+         </td>
+         <td style="width:18px;" class="node_list_sprite">{{{node.status_icon}}}</td>
+-        <td class="resource_name" nowrap {{bind-attr node=node.style}}>{{node._id}}</td>
++        <td class="resource_name" nowrap {{bind-attr node=node.style}}>
++          <span {{bind-attr class=node.span_class}}>{{node._id}}</span>
++        </td>
+         <td style="width:200px;" class="resource_type" {{bind-attr style=node.style}}>{{node.resource_type}}</td>
+         <td style="width:18px;">
+           <div style="display: none;" class="arrow sprites"></div>
+-- 
+1.9.1
+

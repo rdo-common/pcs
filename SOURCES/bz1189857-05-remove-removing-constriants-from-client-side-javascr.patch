@@ -1,0 +1,73 @@
+From 41e2d3e4f5ae0331d7984612485b3bbb84d41304 Mon Sep 17 00:00:00 2001
+From: Ondrej Mular <omular@redhat.com>
+Date: Wed, 2 Sep 2015 12:39:06 +0200
+Subject: [PATCH] remove removing constriants from client-side (javascript)
+
+All changes are displayed after update.
+---
+ pcsd/public/js/nodes-ember.js | 24 ------------------------
+ pcsd/public/js/pcsd.js        |  6 ------
+ 2 files changed, 30 deletions(-)
+
+diff --git a/pcsd/public/js/nodes-ember.js b/pcsd/public/js/nodes-ember.js
+index 0943c65..5fec386 100644
+--- a/pcsd/public/js/nodes-ember.js
++++ b/pcsd/public/js/nodes-ember.js
+@@ -390,30 +390,6 @@ Pcs.resourcesContainer = Ember.Object.create({
+     };
+   },
+ 
+-  remove_constraint: function(constraint_id) {
+-    $.each(this.get('resource_map'), function(key, resource) {
+-      $.each(
+-        [
+-          "location_constraints",
+-          "ordering_constraints",
+-          "ordering_set_constraints",
+-          "colocation_constraints"
+-        ],
+-        function(_, constraint_type) {
+-          if (resource.get(constraint_type)) {
+-            resource.set(
+-              constraint_type,
+-              $.grep(
+-                resource.get(constraint_type),
+-                function(value2, key) { return value2.id != constraint_id; }
+-              )
+-            );
+-          }
+-        }
+-      );
+-    });
+-  },
+-
+   update_meta_attr: function(resource_id, attr, value) {
+     value = typeof value !== 'undefined' ? value.trim() : "";
+     var data = {
+diff --git a/pcsd/public/js/pcsd.js b/pcsd/public/js/pcsd.js
+index 879b533..197cdd1 100644
+--- a/pcsd/public/js/pcsd.js
++++ b/pcsd/public/js/pcsd.js
+@@ -1595,9 +1595,6 @@ function remove_constraint(id) {
+     url: get_cluster_remote_url() + 'remove_constraint_remote',
+     data: {"constraint_id": id},
+     timeout: pcs_timeout,
+-    success: function (data) {
+-      Pcs.resourcesContainer.remove_constraint(id);
+-    },
+     error: function (xhr, status, error) {
+       alert(
+         "Error removing constraint "
+@@ -1617,9 +1614,6 @@ function remove_constraint_rule(id) {
+     url: get_cluster_remote_url() + 'remove_constraint_rule_remote',
+     data: {"rule_id": id},
+     timeout: pcs_timeout,
+-    success: function (data) {
+-      Pcs.resourcesContainer.remove_constraint(id);
+-    },
+     error: function (xhr, status, error) {
+       alert(
+         "Error removing constraint rule "
+-- 
+1.9.1
+

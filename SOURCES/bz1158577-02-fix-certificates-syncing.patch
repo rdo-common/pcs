@@ -1,0 +1,554 @@
+From 8363f06e73bba0a1d3f7d18cf5b1cde5b5080141 Mon Sep 17 00:00:00 2001
+From: Tomas Jelinek <tojeline@redhat.com>
+Date: Thu, 27 Aug 2015 14:29:21 +0200
+Subject: [PATCH] fix certificates syncing
+
+---
+ pcs/cluster.py |  16 +++---
+ pcs/pcsd.py    | 107 ++++++++++++++++++++++++++--------------
+ pcs/utils.py   |  29 +++++++++++
+ pcsd/pcs.rb    | 153 ++++++++++++++++++++++++++++++++++++++++++++++++++++-----
+ pcsd/pcsd.rb   |  12 ++++-
+ pcsd/remote.rb |  12 +++--
+ pcsd/ssl.rb    |  26 ++++++++--
+ 7 files changed, 292 insertions(+), 63 deletions(-)
+
+diff --git a/pcs/cluster.py b/pcs/cluster.py
+index c982ffe..d2a80a8 100644
+--- a/pcs/cluster.py
++++ b/pcs/cluster.py
+@@ -345,13 +345,13 @@ def corosync_setup(argv,returnConfig=False):
+         sync_start(argv, primary_nodes)
+         if "--enable" in utils.pcs_options:
+             enable_cluster(primary_nodes)
+-        pcsd.pcsd_sync_certs([])
++        pcsd.pcsd_sync_certs([], exit_after_error=False)
+         return
+     elif not returnConfig and not "--local" in utils.pcs_options:# and fedora_config:
+         sync(argv, primary_nodes)
+         if "--enable" in utils.pcs_options:
+             enable_cluster(primary_nodes)
+-        pcsd.pcsd_sync_certs([])
++        pcsd.pcsd_sync_certs([], exit_after_error=False)
+         return
+     else:
+         nodes = argv[1:]
+@@ -1190,15 +1190,17 @@ def cluster_node(argv):
+ 
+             utils.setCorosyncConfig(node0, corosync_conf)
+             if "--enable" in utils.pcs_options:
+-                utils.enableCluster(node0)
++                retval, err = utils.enableCluster(node0)
++                if retval != 0:
++                    print("Warning: enable cluster - {0}".format(err))
+             if "--start" in utils.pcs_options or utils.is_rhel6():
+                 # always start new node on cman cluster
+                 # otherwise it will get fenced
+-                utils.startCluster(node0)
++                retval, err = utils.startCluster(node0)
++                if retval != 0:
++                    print("Warning: start cluster - {0}".format(err))
+ 
+-            pcsd_data = {'nodes': [node0]}
+-            utils.run_pcsdcli('send_local_certs', pcsd_data)
+-            utils.run_pcsdcli('pcsd_restart_nodes', pcsd_data)
++            pcsd.pcsd_sync_certs([node0], exit_after_error=False)
+         else:
+             utils.err("Unable to update any nodes")
+         output, retval = utils.reloadCorosync()
+diff --git a/pcs/pcsd.py b/pcs/pcsd.py
+index 6002c1a..b1b6be6 100644
+--- a/pcs/pcsd.py
++++ b/pcs/pcsd.py
+@@ -36,14 +36,15 @@ def pcsd_certkey(argv):
+     try:
+         with open(certfile, 'r') as myfile:
+             cert = myfile.read()
+-    except IOError as e:
+-        utils.err(e)
+-
+-    try:
+         with open(keyfile, 'r') as myfile:
+             key = myfile.read()
+     except IOError as e:
+         utils.err(e)
++    errors = utils.verify_cert_key_pair(cert, key)
++    if errors:
++        for err in errors:
++            utils.err(err, False)
++        sys.exit(1)
+ 
+     if not "--force" in utils.pcs_options and (os.path.exists(settings.pcsd_cert_location) or os.path.exists(settings.pcsd_key_location)):
+         utils.err("certificate and/or key already exists, your must use --force to overwrite")
+@@ -70,39 +71,71 @@ def pcsd_certkey(argv):
+ 
+     print "Certificate and key updated, you may need to restart pcsd (service pcsd restart) for new settings to take effect"
+ 
+-def pcsd_sync_certs(argv):
+-    nodes = utils.getNodesFromCorosyncConf()
+-    pcsd_data = {'nodes': nodes}
+-    commands = [
+-        {
+-            "command": "send_local_certs",
+-            "message": "Synchronizing pcsd certificates on nodes {0}.".format(
+-                ", ".join(nodes)
+-            ),
+-        },
+-        {
+-            "command": "pcsd_restart_nodes",
+-            "message": "Restaring pcsd on the nodes in order to reload "
+-                + "the certificates."
+-            ,
+-        },
+-    ]
+-    for cmd in commands:
+-        error = ''
+-        print cmd["message"]
+-        output, retval = utils.run_pcsdcli(cmd["command"], pcsd_data)
+-        if retval == 0 and output['status'] == 'ok' and output['data']:
+-            try:
+-                if output['data']['status'] != 'ok' and output['data']['text']:
+-                    error = output['data']['text']
+-            except KeyError:
+-                error = 'Unable to communicate with pcsd'
+-        else:
+-            error = 'Unable to sync pcsd certificates'
+-        if error:
+-            # restart pcsd even if sync failed in order to reload
+-            # the certificates on nodes where it succeded
+-            utils.err(error, False)
++def pcsd_sync_certs(argv, exit_after_error=True):
++    error = False
++    nodes_sync = argv if argv else utils.getNodesFromCorosyncConf()
++    nodes_restart = []
++
++    print("Synchronizing pcsd certificates on nodes {0}...".format(
++        ", ".join(nodes_sync)
++    ))
++    pcsd_data = {
++        "nodes": nodes_sync,
++    }
++    output, retval = utils.run_pcsdcli("send_local_certs", pcsd_data)
++    if retval == 0 and output["status"] == "ok" and output["data"]:
++        try:
++            sync_result = output["data"]
++            if sync_result["node_status"]:
++                for node, status in sync_result["node_status"].items():
++                    print("{0}: {1}".format(node, status["text"]))
++                    if status["status"] == "ok":
++                        nodes_restart.append(node)
++                    else:
++                        error = True
++            if sync_result["status"] != "ok":
++                error = True
++                utils.err(sync_result["text"], False)
++            if error and not nodes_restart:
++                if exit_after_error:
++                    sys.exit(1)
++                else:
++                    return
++            print
++        except (KeyError, AttributeError):
++            utils.err("Unable to communicate with pcsd", exit_after_error)
++            return
++    else:
++        utils.err("Unable to sync pcsd certificates", exit_after_error)
++        return
++
++    print("Restaring pcsd on the nodes in order to reload the certificates...")
++    pcsd_data = {
++        "nodes": nodes_restart,
++    }
++    output, retval = utils.run_pcsdcli("pcsd_restart_nodes", pcsd_data)
++    if retval == 0 and output["status"] == "ok" and output["data"]:
++        try:
++            restart_result = output["data"]
++            if restart_result["node_status"]:
++                for node, status in restart_result["node_status"].items():
++                    print("{0}: {1}".format(node, status["text"]))
++                    if status["status"] != "ok":
++                        error = True
++            if restart_result["status"] != "ok":
++                error = True
++                utils.err(restart_result["text"], False)
++            if error:
++                if exit_after_error:
++                    sys.exit(1)
++                else:
++                    return
++        except (KeyError, AttributeError):
++            utils.err("Unable to communicate with pcsd", exit_after_error)
++            return
++    else:
++        utils.err("Unable to restart pcsd", exit_after_error)
++        return
+ 
+ def pcsd_clear_auth(argv):
+     output = []
+diff --git a/pcs/utils.py b/pcs/utils.py
+index 761723b..c91b50e 100644
+--- a/pcs/utils.py
++++ b/pcs/utils.py
+@@ -1880,6 +1880,35 @@ def is_iso8601_date(var):
+     output, retVal = run(["iso8601", "-d", var])
+     return retVal == 0
+ 
++def verify_cert_key_pair(cert, key):
++    errors = []
++    cert_modulus = ""
++    key_modulus = ""
++
++    output, retval = run(
++        ["/usr/bin/openssl", "x509", "-modulus", "-noout"],
++        string_for_stdin=cert
++    )
++    if retval != 0:
++        errors.append("Invalid certificate: {0}".format(output.strip()))
++    else:
++        cert_modulus = output.strip()
++
++    output, retval = run(
++        ["/usr/bin/openssl", "rsa", "-modulus", "-noout"],
++        string_for_stdin=key
++    )
++    if retval != 0:
++        errors.append("Invalid key: {0}".format(output.strip()))
++    else:
++        key_modulus = output.strip()
++
++    if not errors and cert_modulus and key_modulus:
++        if cert_modulus != key_modulus:
++            errors.append("Certificate does not match the key")
++
++    return errors
++
+ # Does pacemaker consider a variable as true in cib?
+ # See crm_is_true in pacemaker/lib/common/utils.c
+ def is_cib_true(var):
+diff --git a/pcsd/pcs.rb b/pcsd/pcs.rb
+index 1cddca8..37f6b83 100644
+--- a/pcsd/pcs.rb
++++ b/pcsd/pcs.rb
+@@ -1215,29 +1215,84 @@ def send_local_configs_to_nodes(
+ end
+ 
+ def send_local_certs_to_nodes(session, nodes)
+-  data = {
+-    'ssl_cert' => File.read(CRT_FILE),
+-    'ssl_key' => File.read(KEY_FILE),
+-    'cookie_secret' => File.read(COOKIE_FILE),
+-  }
++  begin
++    data = {
++      'ssl_cert' => File.read(CRT_FILE),
++      'ssl_key' => File.read(KEY_FILE),
++      'cookie_secret' => File.read(COOKIE_FILE),
++    }
++  rescue => e
++    return {
++      'status' => 'error',
++      'text' => "Unable to read certificates: #{e}",
++      'node_status' => {},
++    }
++  end
++
++  crt_errors = verify_cert_key_pair(data['ssl_cert'], data['ssl_key'])
++  if crt_errors and not crt_errors.empty?
++    return {
++      'status' => 'error',
++      'text' => "Invalid certificate and/or key: #{crt_errors.join}",
++      'node_status' => {},
++    }
++  end
++  secret_errors = verify_cookie_secret(data['cookie_secret'])
++  if secret_errors and not secret_errors.empty?
++    return {
++      'status' => 'error',
++      'text' => "Invalid cookie secret: #{secret_errors.join}",
++      'node_status' => {},
++    }
++  end
++
+   node_response = {}
+   threads = []
+   nodes.each { |node|
+     threads << Thread.new {
+-      code, _ = send_request_with_token(session, node, '/set_certs', true, data)
+-      node_response[node] = 200 == code ? 'ok' : 'error'
++      code, response = send_request_with_token(
++        session, node, '/set_certs', true, data
++      )
++      node_response[node] = [code, response]
+     }
+   }
+   threads.each { |t| t.join }
+ 
+   node_error = []
++  node_status = {}
+   node_response.each { |node, response|
+-    node_error << node if response != 'ok'
++    if response[0] == 200
++      node_status[node] = {
++        'status' => 'ok',
++        'text' => 'Success',
++      }
++    else
++      text = response[1]
++      if response[0] == 401
++        text = "Unable to authenticate, try running 'pcs cluster auth'"
++      elsif response[0] == 400
++        begin
++          parsed_response = JSON.parse(response[1], {:symbolize_names => true})
++          if parsed_response[:noresponse]
++            text = "Unable to connect"
++          elsif parsed_response[:notoken] or parsed_response[:notauthorized]
++            text = "Unable to authenticate, try running 'pcs cluster auth'"
++          end
++        rescue JSON::ParserError
++        end
++      end
++      node_status[node] = {
++        'status' => 'error',
++        'text' => text
++      }
++      node_error << node
++    end
+   }
+   return {
+     'status' => node_error.empty?() ? 'ok' : 'error',
+     'text' => node_error.empty?() ? 'Success' : \
+       "Unable to save pcsd certificates to nodes: #{node_error.join(', ')}",
++    'node_status' => node_status,
+   }
+ end
+ 
+@@ -1246,20 +1301,49 @@ def pcsd_restart_nodes(session, nodes)
+   threads = []
+   nodes.each { |node|
+     threads << Thread.new {
+-      code, _ = send_request_with_token(session, node, '/pcsd_restart', true)
+-      node_response[node] = 200 == code ? 'ok' : 'error'
++      code, response = send_request_with_token(
++        session, node, '/pcsd_restart', true
++      )
++      node_response[node] = [code, response]
+     }
+   }
+   threads.each { |t| t.join }
+ 
+   node_error = []
++  node_status = {}
+   node_response.each { |node, response|
+-    node_error << node if response != 'ok'
++    if response[0] == 200
++      node_status[node] = {
++        'status' => 'ok',
++        'text' => 'Success',
++      }
++    else
++      text = response[1]
++      if response[0] == 401
++        text = "Unable to authenticate, try running 'pcs cluster auth'"
++      elsif response[0] == 400
++        begin
++          parsed_response = JSON.parse(response[1], {:symbolize_names => true})
++          if parsed_response[:noresponse]
++            text = "Unable to connect"
++          elsif parsed_response[:notoken] or parsed_response[:notauthorized]
++            text = "Unable to authenticate, try running 'pcs cluster auth'"
++          end
++        rescue JSON::ParserError
++        end
++      end
++      node_status[node] = {
++        'status' => 'error',
++        'text' => text
++      }
++      node_error << node
++    end
+   }
+   return {
+     'status' => node_error.empty?() ? 'ok' : 'error',
+     'text' => node_error.empty?() ? 'Success' : \
+       "Unable to restart pcsd on nodes: #{node_error.join(', ')}",
++    'node_status' => node_status,
+   }
+ end
+ 
+@@ -1280,6 +1364,53 @@ def write_file_lock(path, perm, data)
+   end
+ end
+ 
++def verify_cert_key_pair(cert, key)
++  errors = []
++  cert_modulus = nil
++  key_modulus = nil
++
++  stdout, stderr, retval = run_cmd_options(
++    PCSAuth.getSuperuserSession(),
++    {
++      'stdin' => cert,
++    },
++    '/usr/bin/openssl', 'x509', '-modulus', '-noout'
++  )
++  if retval != 0
++    errors << "Invalid certificate: #{stderr.join}"
++  else
++    cert_modulus = stdout.join.strip
++  end
++
++  stdout, stderr, retval = run_cmd_options(
++    PCSAuth.getSuperuserSession(),
++    {
++      'stdin' => key,
++    },
++    '/usr/bin/openssl', 'rsa', '-modulus', '-noout'
++  )
++  if retval != 0
++    errors << "Invalid key: #{stderr.join}"
++  else
++    key_modulus = stdout.join.strip
++  end
++
++  if errors.empty? and cert_modulus and key_modulus
++    if cert_modulus != key_modulus
++      errors << 'Certificate does not match the key'
++    end
++  end
++
++  return errors
++end
++
++def verify_cookie_secret(secret)
++  if secret.empty?
++    return ['Cookie secret is empty']
++  end
++  return []
++end
++
+ def cluster_status_from_nodes(session, cluster_nodes, cluster_name)
+   node_map = {}
+   forbidden_nodes = {}
+diff --git a/pcsd/pcsd.rb b/pcsd/pcsd.rb
+index 1f26fe5..da47fb2 100644
+--- a/pcsd/pcsd.rb
++++ b/pcsd/pcsd.rb
+@@ -25,10 +25,20 @@ Dir["wizards/*.rb"].each {|file| require file}
+ 
+ use Rack::CommonLogger
+ 
++def generate_cookie_secret
++  return SecureRandom.hex(30)
++end
++
+ begin
+   secret = File.read(COOKIE_FILE)
++  secret_errors = verify_cookie_secret(secret)
++  if secret_errors and not secret_errors.empty?
++    secret_errors.each { |err| $logger.error err }
++    $logger.error "Invalid cookie secret, using temporary one"
++    secret = generate_cookie_secret()
++  end
+ rescue Errno::ENOENT
+-  secret = SecureRandom.hex(30)
++  secret = generate_cookie_secret()
+   File.open(COOKIE_FILE, 'w', 0700) {|f| f.write(secret)}
+ end
+ 
+diff --git a/pcsd/remote.rb b/pcsd/remote.rb
+index 4655756..22af38a 100644
+--- a/pcsd/remote.rb
++++ b/pcsd/remote.rb
+@@ -584,15 +584,19 @@ def set_certs(params, request, session)
+     return [400, 'cannot save ssl key without ssl certificate']
+   end
+   if !ssl_cert.empty? and !ssl_key.empty?
++    ssl_errors = verify_cert_key_pair(ssl_cert, ssl_key)
++    if ssl_errors and !ssl_errors.empty?
++      return [400, ssl_errors.join]
++    end
+     begin
+       write_file_lock(CRT_FILE, 0700, ssl_cert)
+       write_file_lock(KEY_FILE, 0700, ssl_key)
+-    rescue
++    rescue => e
+       # clean the files if we ended in the middle
+       # the files will be regenerated on next pcsd start
+       FileUtils.rm(CRT_FILE, {:force => true})
+       FileUtils.rm(KEY_FILE, {:force => true})
+-      return [400, 'cannot save ssl files']
++      return [400, "cannot save ssl files: #{e}"]
+     end
+   end
+ 
+@@ -601,8 +605,8 @@ def set_certs(params, request, session)
+     if !cookie_secret.empty?
+       begin
+         write_file_lock(COOKIE_FILE, 0700, cookie_secret)
+-      rescue
+-        return [400, 'cannot save cookie secret']
++      rescue => e
++        return [400, "cannot save cookie secret: #{e}"]
+       end
+     end
+   end
+diff --git a/pcsd/ssl.rb b/pcsd/ssl.rb
+index 02372f6..e948aef 100644
+--- a/pcsd/ssl.rb
++++ b/pcsd/ssl.rb
+@@ -5,10 +5,12 @@ require 'openssl'
+ require 'rack'
+ 
+ require 'bootstrap.rb'
++require 'pcs.rb'
+ 
+ server_name = WEBrick::Utils::getservername
++$logger = configure_logger('/var/log/pcsd/pcsd.log')
+ 
+-if not File.exists?(CRT_FILE) or not File.exists?(KEY_FILE)
++def generate_cert_key_pair(server_name)
+   name = "/C=US/ST=MN/L=Minneapolis/O=pcsd/OU=pcsd/CN=#{server_name}"
+   ca   = OpenSSL::X509::Name.parse(name)
+   key = OpenSSL::PKey::RSA.new(2048)
+@@ -21,9 +23,27 @@ if not File.exists?(CRT_FILE) or not File.exists?(KEY_FILE)
+   crt.not_before = Time.now
+   crt.not_after  = Time.now + 10 * 365 * 24 * 60 * 60 # 10 year
+   crt.sign(key, OpenSSL::Digest::SHA256.new)
++  return crt, key
++end
+ 
++if not File.exists?(CRT_FILE) or not File.exists?(KEY_FILE)
++  crt, key = generate_cert_key_pair(server_name)
+   File.open(CRT_FILE, 'w',0700) {|f| f.write(crt)}
+   File.open(KEY_FILE, 'w',0700) {|f| f.write(key)}
++else
++  crt, key = nil, nil
++  begin
++    crt = File.read(CRT_FILE)
++    key = File.read(KEY_FILE)
++  rescue => e
++    $logger.error "Unable to read certificate or key: #{e}"
++  end
++  crt_errors = verify_cert_key_pair(crt, key)
++  if crt_errors and not crt_errors.empty?
++    crt_errors.each { |err| $logger.error err }
++    $logger.error "Invalid certificate and/or key, using temporary ones"
++    crt, key = generate_cert_key_pair(server_name)
++  end
+ end
+ 
+ webrick_options = {
+@@ -32,8 +52,8 @@ webrick_options = {
+   :Host               => '::',
+   :SSLEnable          => true,
+   :SSLVerifyClient    => OpenSSL::SSL::VERIFY_NONE,
+-  :SSLCertificate     => OpenSSL::X509::Certificate.new(File.open(CRT_FILE).read),
+-  :SSLPrivateKey      => OpenSSL::PKey::RSA.new(File.open(KEY_FILE).read()),
++  :SSLCertificate     => OpenSSL::X509::Certificate.new(crt),
++  :SSLPrivateKey      => OpenSSL::PKey::RSA.new(key),
+   :SSLCertName        => [[ "CN", server_name ]],
+   :SSLOptions         => OpenSSL::SSL::OP_NO_SSLv2 | OpenSSL::SSL::OP_NO_SSLv3,
+ }
+-- 
+1.9.1
+

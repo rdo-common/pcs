@@ -1,0 +1,1223 @@
+From 9830bad113bf07fb65af18e2f2423c27da0180c0 Mon Sep 17 00:00:00 2001
+From: Ondrej Mular <omular@redhat.com>
+Date: Tue, 8 Sep 2015 12:46:50 +0200
+Subject: [PATCH] web UI: multiple fixes in the dashboard
+
+- fix no quorum message
+- fix status inconsistency of offline cluster
+- fix status icons
+- cluster status is 'failed' if there is resource with status 'blocked'
+- fix random unselecting of current cluster
+- performance improvements in loading cluster status
+- removed icon that indicates issue in cluster
+- changed status detection of resources
+---
+ pcsd/cluster_entity.rb           | 150 +++++++++++++++--------
+ pcsd/pcs.rb                      | 231 +++++++++++++++++------------------
+ pcsd/public/js/nodes-ember.js    | 122 +++++++++----------
+ pcsd/public/js/pcsd.js           |  24 +++-
+ pcsd/test/test_all_suite.rb      |   1 +
+ pcsd/test/test_cluster_entity.rb | 126 +++++++++++++++----
+ pcsd/test/test_pcs.rb            | 257 +++++++++++++++++++++++++++++++++++++++
+ pcsd/views/_cluster_list.erb     |   6 +-
+ pcsd/views/main.erb              |   2 +-
+ pcsd/views/manage.erb            | 243 ++++++++++++++++++------------------
+ 10 files changed, 779 insertions(+), 383 deletions(-)
+ create mode 100644 pcsd/test/test_pcs.rb
+
+diff --git a/pcsd/cluster_entity.rb b/pcsd/cluster_entity.rb
+index 4f751b8..b5d2719 100644
+--- a/pcsd/cluster_entity.rb
++++ b/pcsd/cluster_entity.rb
+@@ -3,6 +3,34 @@ require 'pcs.rb'
+ 
+ module ClusterEntity
+ 
++  def self.get_rsc_status(crm_dom)
++    unless crm_dom
++      return {}
++    end
++    status = {}
++    crm_dom.elements.each('/crm_mon/resources//resource') { |e|
++      rsc_id = e.attributes['id'].split(':')[0]
++      status[rsc_id] ||= []
++      status[rsc_id] << ClusterEntity::CRMResourceStatus.new(e)
++    }
++    return status
++  end
++
++  def self.get_resources_operations(cib_dom)
++    unless cib_dom
++      return {}
++    end
++    operations = {}
++    cib_dom.elements.each(
++      '/cib/status/node_state/lrm/lrm_resources/lrm_resource/lrm_rsc_op'
++    ) { |e|
++      rsc_id = e.parent.attributes['id'].split(':')[0]
++      operations[rsc_id] ||= []
++      operations[rsc_id] << ClusterEntity::ResourceOperation.new(e)
++    }
++    return operations
++  end
++
+   def self.obj_to_hash(obj, variables=nil)
+     unless variables
+       variables = obj.instance_variables
+@@ -454,8 +482,9 @@ module ClusterEntity
+     attr_accessor :agentname, :_class, :provider, :type, :stonith,
+                   :instance_attr, :crm_status, :operations
+ 
+-    def initialize(primitive_cib_element=nil, crm_dom=nil, parent=nil, cib_dom=nil)
+-      super(primitive_cib_element, crm_dom, parent)
++    def initialize(primitive_cib_element=nil, rsc_status=nil, parent=nil,
++        operations=nil)
++      super(primitive_cib_element, nil, parent)
+       @class_type = 'primitive'
+       @agentname = nil
+       @_class = nil
+@@ -482,18 +511,12 @@ module ClusterEntity
+           )
+         }
+         @stonith = @_class == 'stonith'
+-        if @id and crm_dom
+-          crm_dom.elements.each("//resource[starts-with(@id, \"#{@id}:\")] | "\
+-              + "//resource[@id=\"#{@id}\"]") { |e|
+-            @crm_status << CRMResourceStatus.new(e)
+-          }
++        if @id and rsc_status
++          @crm_status = rsc_status[@id] || []
+         end
+ 
+         @status = get_status
+-
+-        if cib_dom
+-          load_operations(cib_dom)
+-        end
++        load_operations(operations)
+       end
+     end
+ 
+@@ -525,28 +548,26 @@ module ClusterEntity
+       return status
+     end
+ 
+-    def load_operations(cib_dom)
+-      unless @id
++    def load_operations(operations)
++      @operations = []
++      unless operations and @id and operations[@id]
+         return
+       end
+ 
+-      @operations = []
+       failed_ops = []
+       message_list = []
+-      cib_dom.elements.each("//lrm_resource[@id='#{@id}']/lrm_rsc_op | "\
+-      + "//lrm_resource[starts-with(@id, \"#{@id}:\")]/lrm_rsc_op") { |e|
+-        operation = ResourceOperation.new(e)
+-        @operations << operation
+-        if operation.rc_code != 0
++      operations[@id].each { |o|
++        @operations << o
++        if o.rc_code != 0
+           # 7 == OCF_NOT_RUNNING == The resource is safely stopped.
+-          next if operation.operation == 'monitor' and operation.rc_code == 7
++          next if o.operation == 'monitor' and o.rc_code == 7
+           # 8 == OCF_RUNNING_MASTER == The resource is running in master mode.
+-          next if 8 == operation.rc_code
+-          failed_ops << operation
+-          message = "Failed to #{operation.operation} #{@id}"
+-          message += " on #{Time.at(operation.last_rc_change).asctime}"
+-          message += " on node #{operation.on_node}" if operation.on_node
+-          message += ": #{operation.exit_reason}" if operation.exit_reason
++          next if 8 == o.rc_code
++          failed_ops << o
++          message = "Failed to #{o.operation} #{@id}"
++          message += " on #{Time.at(o.last_rc_change).asctime}"
++          message += " on node #{o.on_node}" if o.on_node
++          message += ": #{o.exit_reason}" if o.exit_reason
+           message_list << {
+             :message => message
+           }
+@@ -652,26 +673,48 @@ module ClusterEntity
+   class Group < Resource
+     attr_accessor :members
+ 
+-    def initialize(group_cib_element=nil, crm_dom=nil, parent=nil, cib_dom=nil)
+-      super(group_cib_element, crm_dom, parent)
++    def initialize(
++      group_cib_element=nil, rsc_status=nil, parent=nil, operations=nil
++    )
++      super(group_cib_element, nil, parent)
+       @class_type = 'group'
+       @members = []
+       if group_cib_element and group_cib_element.name == 'group'
+         @status = ClusterEntity::ResourceStatus.new(:running)
+         group_cib_element.elements.each('primitive') { |e|
+-          p = Primitive.new(e, crm_dom, self, cib_dom)
++          p = Primitive.new(e, rsc_status, self, operations)
+           members << p
+-          @status = p.status if @status < p.status
+         }
++        update_status
+       end
+     end
+ 
+     def update_status
+       @status = ClusterEntity::ResourceStatus.new(:running)
++      first = true
+       @members.each { |p|
+         p.update_status
+-        @status = p.status if @status < p.status
++        if first
++          first = false
++          next
++        end
++        if (
++          p.status == ClusterEntity::ResourceStatus.new(:disabled) or
++          p.status == ClusterEntity::ResourceStatus.new(:blocked) or
++          p.status == ClusterEntity::ResourceStatus.new(:failed)
++        )
++          @status = ClusterEntity::ResourceStatus.new(:partially_running)
++        end
+       }
++      if (@members and @members.length > 0 and
++        (ClusterEntity::ResourceStatus.new(:running) != @members[0].status and
++        ClusterEntity::ResourceStatus.new(:unknown) != @members[0].status)
++      )
++        @status = @members[0].status
++      end
++      if disabled?
++        @status = ClusterEntity::ResourceStatus.new(:disabled)
++      end
+     end
+ 
+     def to_status(version='1')
+@@ -713,8 +756,9 @@ module ClusterEntity
+   class MultiInstance < Resource
+     attr_accessor :member, :unique, :managed, :failed, :failure_ignored
+ 
+-    def initialize(resource_cib_element=nil, crm_dom=nil, parent=nil, cib_dom=nil)
+-      super(resource_cib_element, crm_dom, parent)
++    def initialize(resource_cib_element=nil, crm_dom=nil, rsc_status=nil,
++                   parent=nil, operations=nil)
++      super(resource_cib_element, nil, parent)
+       @member = nil
+       @multi_state = false
+       @unique = false
+@@ -730,15 +774,13 @@ module ClusterEntity
+       )
+         member = resource_cib_element.elements['group | primitive']
+         if member and member.name == 'group'
+-          @member = Group.new(member, crm_dom, self, cib_dom)
++          @member = Group.new(member, rsc_status, self, operations)
+         elsif member and member.name == 'primitive'
+-          @member = Primitive.new(member, crm_dom, self, cib_dom)
+-        end
+-        if @member
+-          @status = @member.status
++          @member = Primitive.new(member, rsc_status, self, operations)
+         end
++        update_status
+         if crm_dom
+-          status = crm_dom.elements["//clone[@id='#{@id}']"]
++          status = crm_dom.elements["/crm_mon/resources//clone[@id='#{@id}']"]
+           if status
+             @unique = status.attributes['unique'] == 'true'
+             @managed = status.attributes['managed'] == 'true'
+@@ -754,6 +796,9 @@ module ClusterEntity
+         @member.update_status
+         @status = @member.status
+       end
++      if disabled?
++        @status = ClusterEntity::ResourceStatus.new(:disabled)
++      end
+     end
+ 
+     def to_status(version='1')
+@@ -776,8 +821,11 @@ module ClusterEntity
+ 
+   class Clone < MultiInstance
+ 
+-    def initialize(resource_cib_element=nil, crm_dom=nil, parent=nil, cib_dom=nil)
+-      super(resource_cib_element, crm_dom, parent, cib_dom)
++    def initialize(
++      resource_cib_element=nil, crm_dom=nil, rsc_status=nil, parent=nil,
++      operations=nil
++    )
++      super(resource_cib_element, crm_dom, rsc_status, parent, operations)
+       @class_type = 'clone'
+     end
+ 
+@@ -808,11 +856,12 @@ module ClusterEntity
+   class MasterSlave < MultiInstance
+     attr_accessor :masters, :slaves
+ 
+-    def initialize(master_cib_element=nil, crm_dom=nil, parent=nil, cib_dom=nil)
+-      super(master_cib_element, crm_dom, parent, cib_dom)
++    def initialize(master_cib_element=nil, crm_dom=nil, rsc_status=nil, parent=nil, operations=nil)
++      super(master_cib_element, crm_dom, rsc_status, parent, operations)
+       @class_type = 'master'
+       @masters = []
+       @slaves = []
++      update_status
+       if @member
+         if @member.instance_of?(Primitive)
+           primitive_list = [@member]
+@@ -820,15 +869,15 @@ module ClusterEntity
+           primitive_list = @member.members
+         end
+         @masters, @slaves = get_masters_slaves(primitive_list)
+-        if @masters.empty? and !disabled?
+-          @status = ClusterEntity::ResourceStatus.new(:partially_running)
++        if (@masters.empty? and
++          @status != ClusterEntity::ResourceStatus.new(:disabled)
++        )
+           @warning_list << {
+             :message => 'Resource is master/slave but has not been promoted '\
+               + 'to master on any node.',
+             :type => 'no_master'
+           }
+         end
+-        @status = @member.status if @status < @member.status
+       end
+     end
+ 
+@@ -857,16 +906,21 @@ module ClusterEntity
+     def update_status
+       if @member
+         @member.update_status
++        @status = @member.status
+         if @member.instance_of?(Primitive)
+           primitive_list = [@member]
+         else
+           primitive_list = @member.members
+         end
+         @masters, @slaves = get_masters_slaves(primitive_list)
+-        if @masters.empty? and !disabled?
++        if (@masters.empty? and
++          @member.status != ClusterEntity::ResourceStatus.new(:disabled)
++        )
+           @status = ClusterEntity::ResourceStatus.new(:partially_running)
+         end
+-        @status = @member.status if @status < @member.status
++      end
++      if disabled?
++        @status = ClusterEntity::ResourceStatus.new(:disabled)
+       end
+     end
+ 
+diff --git a/pcsd/pcs.rb b/pcsd/pcs.rb
+index 87404ac..9a0d145 100644
+--- a/pcsd/pcs.rb
++++ b/pcsd/pcs.rb
+@@ -15,14 +15,14 @@ require 'resource.rb'
+ require 'cluster_entity.rb'
+ require 'auth.rb'
+ 
+-def getAllSettings(session)
+-  stdout, stderr, retval = run_cmd(session, PCS, "property")
+-  stdout.map(&:chomp!)
+-  stdout.map(&:strip!)
++def getAllSettings(session, cib_dom=nil)
++  unless cib_dom
++    cib_dom = get_cib_dom(session)
++  end
+   stdout2, stderr2, retval2 = run_cmd(session, PENGINE, "metadata")
+   metadata = stdout2.join
+   ret = {}
+-  if retval == 0 and retval2 == 0
++  if cib_dom and retval2 == 0
+     doc = REXML::Document.new(metadata)
+ 
+     default = ""
+@@ -37,8 +37,9 @@ def getAllSettings(session)
+       ret[name] = {"value" => default, "type" => el_type}
+     }
+ 
+-    stdout.each {|line|
+-      key,val = line.split(': ', 2)
++    cib_dom.elements.each('/cib/configuration/crm_config//nvpair') { |e|
++      key = e.attributes['name']
++      val = e.attributes['value']
+       key.gsub!(/-/,"_")
+       if ret.has_key?(key)
+ 	if ret[key]["type"] == "boolean"
+@@ -723,106 +724,92 @@ def get_cluster_name()
+   end
+ end
+ 
+-def get_node_attributes(session)
+-  stdout, stderr, retval = run_cmd(session, PCS, "property", "list")
+-  if retval != 0
+-    return {}
+-  end
+-
+-  attrs = {}
+-  found = false
+-  stdout.each { |line|
+-    if not found
+-      if line.strip.start_with?("Node Attributes:")
+-        found = true
+-      end
+-      next
+-    end
+-    if not line.start_with?(" ")
+-      break
+-    end
+-    sline = line.split(":", 2)
+-    nodename = sline[0].strip
+-    attrs[nodename] = []
+-    sline[1].strip.split(" ").each { |attr|
+-      key, val = attr.split("=", 2)
+-      attrs[nodename] << {:key => key, :value => val}
++def get_node_attributes(session, cib_dom=nil)
++  unless cib_dom
++    cib_dom = get_cib_dom(session)
++    return {} unless cib_dom
++  end
++  node_attrs = {}
++  cib_dom.elements.each(
++    '/cib/configuration/nodes/node/instance_attributes/nvpair'
++  ) { |e|
++    node = e.parent.parent.attributes['uname']
++    node_attrs[node] ||= []
++    node_attrs[node] << {
++      :id => e.attributes['id'],
++      :key => e.attributes['name'],
++      :value => e.attributes['value']
+     }
+   }
+-  return attrs
++  node_attrs.each { |_, val| val.sort_by! { |obj| obj[:key] }}
++  return node_attrs
+ end
+ 
+-def get_fence_levels(session)
+-  stdout, stderr, retval = run_cmd(session, PCS, "stonith", "level")
+-  if retval != 0 or stdout == ""
+-    return {}
++def get_fence_levels(session, cib_dom=nil)
++  unless cib_dom
++    cib_dom = get_cib_dom(session)
++    return {} unless cib_dom
+   end
+ 
+   fence_levels = {}
+-  node = ""
+-  stdout.each {|line|
+-    if line.start_with?(" Node: ")
+-      node = line.split(":",2)[1].strip
+-      next
+-    end
+-    fence_levels[node] ||= []
+-    md = / Level (\S+) - (.*)$/.match(line)
+-    fence_levels[node] << {"level" => md[1], "devices" => md[2]}
++  cib_dom.elements.each(
++    '/cib/configuration/fencing-topology/fencing-level'
++  ) { |e|
++    target = e.attributes['target']
++    fence_levels[target] ||= []
++    fence_levels[target] << {
++      'level' => e.attributes['index'],
++      'devices' => e.attributes['devices']
++    }
+   }
++  fence_levels.each { |_, val| val.sort_by! { |obj| obj['level'].to_i }}
+   return fence_levels
+ end
+ 
+-def get_acls(session)
+-  stdout, stderr, retval = run_cmd(session, PCS, "acl", "show")
+-  if retval != 0 or stdout == ""
+-    return {}
++def get_acls(session, cib_dom=nil)
++  unless cib_dom
++    cib_dom = get_cib_dom(session)
++    return {} unless cib_dom
+   end
+ 
+-  ret_val = {}
+-  state = nil
+-  user = ""
+-  role = ""
+-
+-  stdout.each do |line|
+-    if m = /^User: (.*)$/.match(line)
+-      user = m[1]
+-      state = "user"
+-      ret_val[state] ||= {}
+-      ret_val[state][user] ||= []
+-      next
+-    elsif m = /^Group: (.*)$/.match(line)
+-      user = m[1]
+-      state = "group"
+-      ret_val[state] ||= {}
+-      ret_val[state][user] ||= []
+-      next
+-    elsif m = /^Role: (.*)$/.match(line)
+-      role = m[1]
+-      state = "role"
+-      ret_val[state] ||= {}
+-      ret_val[state][role] ||= {}
+-      next
+-    end
++  acls = {
++    'role' => {},
++    'group' => {},
++    'user' => {},
++    'target' => {}
++  }
+ 
+-    case state
+-    when "user", "group"
+-      m = /^  Roles: (.*)$/.match(line)
+-      ret_val[state][user] ||= []
+-      m[1].scan(/\S+/).each {|urole|
+-        ret_val[state][user] << urole
++  cib_dom.elements.each('/cib/configuration/acls/*') { |e|
++    type = e.name[4..-1]
++    if e.name == 'acl_role'
++      role_id = e.attributes['id']
++      desc = e.attributes['description']
++      acls[type][role_id] = {}
++      acls[type][role_id]['description'] = desc ? desc : ''
++      acls[type][role_id]['permissions'] = []
++      e.elements.each('acl_permission') { |p|
++        p_id = p.attributes['id']
++        p_kind = p.attributes['kind']
++        val = ''
++        if p.attributes['xpath']
++          val = "xpath #{p.attributes['xpath']}"
++        elsif p.attributes['reference']
++          val = "id #{p.attributes['reference']}"
++        else
++          next
++        end
++        acls[type][role_id]['permissions'] << "#{p_kind} #{val} (#{p_id})"
++      }
++    elsif ['acl_target', 'acl_group'].include?(e.name)
++      id = e.attributes['id']
++      acls[type][id] = []
++      e.elements.each('role') { |r|
++        acls[type][id] << r.attributes['id']
+       }
+-    when "role"
+-      ret_val[state][role] ||= {}
+-      ret_val[state][role]["permissions"] ||= []
+-      ret_val[state][role]["description"] ||= ""
+-      if m = /^  Description: (.*)$/.match(line)
+-        ret_val[state][role]["description"] = m[1]
+-      elsif m = /^  Permission: (.*)$/.match(line)
+-        ret_val[state][role]["permissions"] << m[1]
+-      end
+     end
+-  end
+-  return ret_val
++  }
++  acls['user'] = acls['target']
++  return acls
+ end
+ 
+ def enable_cluster(session)
+@@ -1438,7 +1425,7 @@ def cluster_status_from_nodes(session, cluster_nodes, cluster_name)
+         {:version=>'2', :operations=>'1'},
+         true,
+         nil,
+-        6
++        15
+       )
+       node_map[node] = {}
+       node_map[node].update(overview)
+@@ -1601,10 +1588,10 @@ def cluster_status_from_nodes(session, cluster_nodes, cluster_name)
+     }
+     if status[:status] != 'error'
+       status[:resource_list].each { |resource|
+-        if resource[:status] == 'failed'
++        if ['failed', 'blocked'].include?(resource[:status])
+           status[:status] = 'error'
+           break
+-        elsif ['blocked', 'partially running'].include?(resource[:status])
++        elsif ['partially running'].include?(resource[:status])
+           status[:status] = 'warning'
+         end
+       }
+@@ -1634,10 +1621,11 @@ def get_node_status(session, cib_dom)
+       :cluster_settings => {},
+       :need_ring1_address => need_ring1_address?,
+       :is_cman_with_udpu_transport => is_cman_with_udpu_transport?,
+-      :acls => get_acls(session),
++      :acls => get_acls(session, cib_dom),
+       :username => session[:username],
+-      :fence_levels => get_fence_levels(session),
+-      :node_attr => node_attrs_to_v2(get_node_attributes(session))
++      :fence_levels => get_fence_levels(session, cib_dom),
++      :node_attr => node_attrs_to_v2(get_node_attributes(session, cib_dom)),
++      :known_nodes => []
+   }
+ 
+   nodes = get_nodes_status()
+@@ -1654,10 +1642,10 @@ def get_node_status(session, cib_dom)
+ 
+   if cib_dom
+     node_status[:groups] = get_resource_groups(cib_dom)
+-    node_status[:constraints] = getAllConstraints(cib_dom.elements['//constraints'])
++    node_status[:constraints] = getAllConstraints(cib_dom.elements['/cib/configuration/constraints'])
+   end
+ 
+-  cluster_settings = getAllSettings(session)
++  cluster_settings = getAllSettings(session, cib_dom)
+   if not cluster_settings.has_key?('error')
+     node_status[:cluster_settings] = cluster_settings
+   end
+@@ -1670,7 +1658,7 @@ def get_resource_groups(cib_dom)
+     return []
+   end
+   group_list = []
+-  cib_dom.elements.each('cib/configuration/resources//group') do |e|
++  cib_dom.elements.each('/cib/configuration/resources//group') do |e|
+     group_list << e.attributes['id']
+   end
+   return group_list
+@@ -1682,49 +1670,54 @@ def get_resources(cib_dom, crm_dom=nil, get_operations=false)
+   end
+ 
+   resource_list = []
+-  cib = (get_operations) ? cib_dom : nil
++  operations = (get_operations) ? ClusterEntity::get_resources_operations(cib_dom) : nil
++  rsc_status = ClusterEntity::get_rsc_status(crm_dom)
+ 
+-  cib_dom.elements.each('cib/configuration/resources/primitive') do |e|
+-    resource_list << ClusterEntity::Primitive.new(e, crm_dom, nil, cib)
++  cib_dom.elements.each('/cib/configuration/resources/primitive') do |e|
++    resource_list << ClusterEntity::Primitive.new(e, rsc_status, nil, operations)
+   end
+-  cib_dom.elements.each('cib/configuration/resources/group') do |e|
+-    resource_list << ClusterEntity::Group.new(e, crm_dom, nil, cib)
++  cib_dom.elements.each('/cib/configuration/resources/group') do |e|
++    resource_list << ClusterEntity::Group.new(e, rsc_status, nil, operations)
+   end
+-  cib_dom.elements.each('cib/configuration/resources/clone') do |e|
+-    resource_list << ClusterEntity::Clone.new(e, crm_dom, nil, cib)
++  cib_dom.elements.each('/cib/configuration/resources/clone') do |e|
++    resource_list << ClusterEntity::Clone.new(
++      e, crm_dom, rsc_status, nil, operations
++    )
+   end
+-  cib_dom.elements.each('cib/configuration/resources/master') do |e|
+-    resource_list << ClusterEntity::MasterSlave.new(e, crm_dom, nil, cib)
++  cib_dom.elements.each('/cib/configuration/resources/master') do |e|
++    resource_list << ClusterEntity::MasterSlave.new(
++      e, crm_dom, rsc_status, nil, operations
++    )
+   end
+   return resource_list
+ end
+ 
+-def get_resource_by_id(id, cib_dom, crm_dom=nil, get_operations=false)
++def get_resource_by_id(id, cib_dom, crm_dom=nil, rsc_status=nil, operations=false)
+   unless cib_dom
+     return nil
+   end
+ 
+-  e = cib_dom.elements["cib/configuration/resources//*[@id='#{id}']"]
++  e = cib_dom.elements["/cib/configuration/resources//*[@id='#{id}']"]
+   unless e
+     return nil
+   end
+ 
+   if e.parent.name != 'resources' # if resource is in group, clone or master/slave
+-    p = get_resource_by_id(e.parent.attributes['id'], cib_dom, crm_dom, get_operations)
++    p = get_resource_by_id(
++      e.parent.attributes['id'], cib_dom, crm_dom, rsc_status, operations
++    )
+     return p.get_map[id.to_sym]
+   end
+ 
+-  cib = (get_operations) ? cib_dom : nil
+-
+   case e.name
+     when 'primitive'
+-      return ClusterEntity::Primitive.new(e, crm_dom, nil, cib)
++      return ClusterEntity::Primitive.new(e, rsc_status, nil, operations)
+     when 'group'
+-      return ClusterEntity::Group.new(e, crm_dom, nil, cib)
++      return ClusterEntity::Group.new(e, rsc_status, nil, operations)
+     when 'clone'
+-      return ClusterEntity::Clone.new(e, crm_dom, nil, cib)
++      return ClusterEntity::Clone.new(e, crm_dom, rsc_status, nil, operations)
+     when 'master'
+-      return ClusterEntity::MasterSlave.new(e, crm_dom, nil, cib)
++      return ClusterEntity::MasterSlave.new(e, crm_dom, rsc_status, nil, operations)
+     else
+       return nil
+   end
+@@ -1762,7 +1755,7 @@ def node_attrs_to_v2(node_attrs)
+     all_nodes_attr[node] = []
+     attrs.each { |attr|
+       all_nodes_attr[node] << {
+-        :id => nil,
++        :id => attr[:id],
+         :name => attr[:key],
+         :value => attr[:value]
+       }
+diff --git a/pcsd/public/js/nodes-ember.js b/pcsd/public/js/nodes-ember.js
+index 5fec386..bbeed55 100644
+--- a/pcsd/public/js/nodes-ember.js
++++ b/pcsd/public/js/nodes-ember.js
+@@ -75,9 +75,9 @@ Pcs = Ember.Application.createWithMixins({
+         timeout: 20000,
+         success: function(data) {
+           Pcs.clusterController.update(data);
+-          Ember.run.next(function() {
+-            correct_visibility_dashboard(Pcs.clusterController.cur_cluster);
+-          });
++          if (Pcs.clusterController.get('cur_cluster')) {
++            Pcs.clusterController.update_cur_cluster(Pcs.clusterController.get('cur_cluster').get('name'));
++          }
+           if (data["not_current_data"]) {
+             self.update();
+           }
+@@ -595,30 +595,20 @@ Pcs.ResourceObj = Ember.Object.extend({
+   }.property("class_type"),
+   res_type: Ember.computed.alias('resource_type'),
+   status_icon: function() {
+-    var icon_class;
+-    switch (this.get('status')) {
+-      case "running":
+-        icon_class = "check";
+-        break;
+-      case "disabled":
+-      case "partially running":
+-        icon_class = "warning";
+-        break;
+-      case "failed":
+-      case "blocked":
+-        icon_class = "error";
+-        break;
+-      default:
+-        icon_class = "x";
+-    }
++    var icon_class = get_status_icon_class(this.get("status_val"));
+     return "<div style=\"float:left;margin-right:6px;height:16px;\" class=\"" + icon_class + " sprites\"></div>";
+   }.property("status_val"),
+   status_val: function() {
+-    if (this.get('warning_list').length)
+-      return get_status_value("warning");
++    var status_val = get_status_value(this.get('status'));
++    if (this.get('warning_list').length && status_val != get_status_value('disabled'))
++      status_val = get_status_value("warning");
+     if (this.get('error_list').length)
+-      return get_status_value("error");
+-    return get_status_value(this.status);
++      status_val = get_status_value("error");
++    if ((get_status_value(this.get('status')) - status_val) < 0) {
++      return get_status_value(this.get('status'));
++    } else {
++      return status_val;
++    }
+   }.property('status', 'error_list.@each.message', 'warning_list.@each.message'),
+   status_color: function() {
+     return get_status_color(this.get("status_val"));
+@@ -996,12 +986,17 @@ Pcs.Clusternode = Ember.Object.extend({
+     return this.get('status') == "unknown";
+   }.property("status"),
+   status_val: function() {
+-    if (this.warnings && this.warnings.length)
+-      return get_status_value("warning");
+-    if (this.errors && this.errors.length)
+-      return get_status_value("error");
+-    return get_status_value(this.status);
+-  }.property("status"),
++    var status_val = get_status_value(this.get('status'));
++    if (this.get('warning_list').length)
++      status_val = get_status_value("warning");
++    if (this.get('error_list').length)
++      status_val = get_status_value("error");
++    if ((get_status_value(this.get('status')) - status_val) < 0) {
++      return get_status_value(this.get('status'));
++    } else {
++      return status_val;
++    }
++  }.property('status', 'error_list.@each.message', 'warning_list.@each.message'),
+   status_style: function() {
+     var color = get_status_color(this.get("status_val"));
+     return "color: " + color + ((color != "green")? "; font-weight: bold;" : "");
+@@ -1011,8 +1006,8 @@ Pcs.Clusternode = Ember.Object.extend({
+     return ((this.get("status_val") == get_status_value("ok") || this.status == "standby") ? show + "default-hidden" : "");
+   }.property("status_val"),
+   status_icon: function() {
+-    var icon_class = {"-1": "x", 1: "error", 2: "warning", 3: "x", 4: "check"};
+-    return "<div style=\"float:left;margin-right:6px;\" class=\"" + icon_class[this.get("status_val")] + " sprites\"></div>";
++    var icon_class = get_status_icon_class(this.get("status_val"));
++    return "<div style=\"float:left;margin-right:6px;\" class=\"" + icon_class + " sprites\"></div>";
+   }.property("status_val"),
+   error_list: [],
+   warning_list: [],
+@@ -1158,18 +1153,18 @@ Pcs.Cluster = Ember.Object.extend({
+     return out;
+   }.property("error_list"),
+   status_icon: function() {
+-    var icon_class = {"-1": "x", 1: "error", 2: "warning", 3: "x", 4: "check"};
+-    return "<div style=\"float:left;margin-right:6px;\" class=\"" + icon_class[get_status_value(this.status)] + " sprites\"></div>";
++    var icon_class = get_status_icon_class(get_status_value(this.get('status')));
++    return "<div style=\"float:left;margin-right:6px;\" class=\"" + icon_class + " sprites\"></div>";
+   }.property("status"),
+   quorum_show: function() {
+-    if (this.status == "unknown") {
++    if (this.get('status') == "unknown") {
+       return "<span style='color:orange'>(quorate unknown)</span>"
+-    } else if (!this.quorate) {
++    } else if (!this.get('quorate')) {
+       return "<span style='color: red'>(doesn't have quorum)</span>"
+     } else {
+       return ""
+     }
+-  }.property("status", "quorum"),
++  }.property("status", "quorate"),
+   nodes: [],
+   nodes_failed: 0,
+   resource_list: [],
+@@ -1270,7 +1265,7 @@ Pcs.Cluster = Ember.Object.extend({
+ 
+ Pcs.clusterController = Ember.Object.create({
+   cluster_list: Ember.ArrayController.create({
+-    content: Ember.A(), sortProperties: ['status'],
++    content: Ember.A(), sortProperties: ['status', 'name'],
+     sortAscending: true,
+     sortFunction: function(a,b){return status_comparator(a,b);}
+   }),
+@@ -1283,26 +1278,25 @@ Pcs.clusterController = Ember.Object.create({
+   num_warning: 0,
+   num_unknown: 0,
+ 
+-  update_cur_cluster: function(row) {
++  update_cur_cluster: function(cluster_name) {
+     var self = this;
+-    var cluster_name = $(row).attr("nodeID");
+-    $("#clusters_list").find("div.arrow").hide();
+-    $(row).find("div.arrow").show();
++    $("#clusters_list div.arrow").hide();
++    var selected_cluster = null;
+ 
+     $.each(self.get('cluster_list').get('content'), function(key, cluster) {
+       if (cluster.get("name") == cluster_name) {
+-        self.set('cur_cluster', cluster);
++        selected_cluster = cluster;
+         return false;
+       }
+     });
+-    correct_visibility_dashboard(self.get('cur_cluster'));
+ 
+-    $("#node_sub_info").children().each(function (i, val) {
+-      if ($(val).attr("id") == ("cluster_info_" + cluster_name))
+-        $(val).show();
+-      else
+-        $(val).hide();
+-    });
++    self.set('cur_cluster', selected_cluster);
++    if (selected_cluster) {
++      Ember.run.next(function() {
++        $("#clusters_list tr[nodeID=" + cluster_name + "] div.arrow").show();
++        correct_visibility_dashboard(self.get('cur_cluster'));
++      });
++    }
+   },
+ 
+   update: function(data) {
+@@ -1355,21 +1349,6 @@ Pcs.clusterController = Ember.Object.create({
+         });
+       }
+ 
+-      switch (cluster.get('status')) {
+-        case "ok":
+-          self.incrementProperty('num_ok');
+-          break;
+-        case "error":
+-          self.incrementProperty('num_error');
+-          break;
+-        case "warning":
+-          self.incrementProperty('num_warning');
+-          break;
+-        default:
+-          self.incrementProperty('num_unknown');
+-          break;
+-      }
+-
+       var nodes_to_auth = [];
+       $.each(cluster.get('warning_list'), function(key, val){
+         if (val.hasOwnProperty("type") && val.type == "nodes_not_authorized"){
+@@ -1398,6 +1377,21 @@ Pcs.clusterController = Ember.Object.create({
+ 
+         cluster.set("status", "unknown");
+       }
++
++      switch (get_status_value(cluster.get('status'))) {
++        case get_status_value("ok"):
++          self.incrementProperty('num_ok');
++          break;
++        case get_status_value("error"):
++          self.incrementProperty('num_error');
++          break;
++        case get_status_value("warning"):
++          self.incrementProperty('num_warning');
++          break;
++        default:
++          self.incrementProperty('num_unknown');
++          break;
++      }
+     });
+ 
+     var to_remove = [];
+diff --git a/pcsd/public/js/pcsd.js b/pcsd/public/js/pcsd.js
+index e4830a9..cddf14e 100644
+--- a/pcsd/public/js/pcsd.js
++++ b/pcsd/public/js/pcsd.js
+@@ -1850,10 +1850,10 @@ function get_status_value(status) {
+     standby: 2,
+     "partially running": 2,
+     disabled: 3,
+-    unknown: 3,
+-    ok: 4,
+-    running: 4,
+-    online: 4
++    unknown: 4,
++    ok: 5,
++    running: 5,
++    online: 5
+   };
+   return ((values.hasOwnProperty(status)) ? values[status] : -1);
+ }
+@@ -1866,11 +1866,25 @@ function status_comparator(a,b) {
+   return valA - valB;
+ }
+ 
++function get_status_icon_class(status_val) {
++  switch (status_val) {
++    case get_status_value("error"):
++      return "error";
++    case get_status_value("disabled"):
++    case get_status_value("warning"):
++      return "warning";
++    case get_status_value("ok"):
++      return "check";
++    default:
++      return "x";
++  }
++}
++
+ function get_status_color(status_val) {
+   if (status_val == get_status_value("ok")) {
+     return "green";
+   }
+-  else if (status_val == get_status_value("warning") || status_val == get_status_value("unknown")) {
++  else if (status_val == get_status_value("warning") || status_val == get_status_value("unknown") || status_val == get_status_value('disabled')) {
+     return "orange";
+   }
+   return "red";
+diff --git a/pcsd/views/_cluster_list.erb b/pcsd/views/_cluster_list.erb
+index 9d719e0..90f084e 100644
+--- a/pcsd/views/_cluster_list.erb
++++ b/pcsd/views/_cluster_list.erb
+@@ -22,7 +22,7 @@
+       {{/if}}
+     </tr>
+     {{#each Pcs.clusterController.cluster_list }}
+-    <tr onmouseover="hover_over(this);" onmouseout="hover_out(this);" onclick="Pcs.clusterController.update_cur_cluster(this);" {{bind-attr nodeID="this.name"}}>
++    <tr onmouseover="hover_over(this);" onmouseout="hover_out(this);" onclick="Pcs.clusterController.update_cur_cluster($(this).attr('nodeID'));" {{bind-attr nodeID="this.name"}}>
+     <td class="node_list_check">
+       <input class="node_list_check" type="checkbox" {{bind-attr name="input_name"}} {{bind-attr res_id="name"}}>
+     </td>
+@@ -42,7 +42,7 @@
+       {{else}}
+         {{nodes.length}}
+         {{#if nodes_failed}}
+-        | <div style="display: inline-block;" title="Issue(s) found"><div class="warning sprites"></div> <span style="font-weight: bold; color: red">{{nodes_failed}}</span></div>
++        | <div style="display: inline-block;" title="Issue(s) found"><span style="font-weight: bold; color: red">{{nodes_failed}}</span></div>
+         {{/if}}
+       {{/if}}
+     </td>
+@@ -52,7 +52,7 @@
+       {{else}}
+         {{resource_list.length}}
+         {{#if resources_failed}}
+-      | <div style="display: inline-block;" title="Issue(s) found"><div class="warning sprites"></div> <span style="font-weight: bold; color: red">{{resources_failed}}</span></div>
++      | <div style="display: inline-block;" title="Issue(s) found"><span style="font-weight: bold; color: red">{{resources_failed}}</span></div>
+         {{/if}}
+       {{/if}}
+     </td>
+diff --git a/pcsd/views/main.erb b/pcsd/views/main.erb
+index bb4e989..b24c74a 100644
+--- a/pcsd/views/main.erb
++++ b/pcsd/views/main.erb
+@@ -151,7 +151,7 @@
+             <input disabled style="margin-right: 50px;" type="text" {{bind-attr value=resource._id}} size="35" class="text_field">
+           </td>
+           <td>
+-            <div style="margin-right: 8px;" class="check sprites"></div>
++            {{{resource.status_icon}}}
+           </td>
+           <td nowrap>{{{resource.show_status}}}</td>
+         </tr>
+diff --git a/pcsd/views/manage.erb b/pcsd/views/manage.erb
+index 79a8637..3620779 100644
+--- a/pcsd/views/manage.erb
++++ b/pcsd/views/manage.erb
+@@ -42,131 +42,132 @@
+ 	<div id="node_info_header_title">INFORMATION ABOUT CLUSTERS</div>
+       </div>
+       <div id="node_sub_info">
+-	<div id="no_cluster_selected">Select a cluster to view more detailed cluster information</div>
+-	{{#each Pcs.clusterController.cluster_list}}
+-	  <div style="display:none;" {{bind-attr id=div_id}}>
+-	    <table>
+-	      <tr>
+-          <td style="text-align:right">
+-            <b>Cluster:</b>&nbsp;
+-          </td>
+-          <td>
+-            {{#if forbidden}}
+-              {{name}}
+-            {{else}}
+-              <a {{bind-attr href=url_link}}>{{name}}</a> {{{quorum_show}}}
++        {{#if Pcs.clusterController.cur_cluster}}
++        <div {{bind-attr id=Pcs.clusterController.cur_cluster.div_id}}>
++          <table>
++            <tr>
++              <td style="text-align:right">
++                <b>Cluster:</b>&nbsp;
++              </td>
++              <td>
++                {{#if Pcs.clusterController.cur_cluster.forbidden}}
++                  {{Pcs.clusterController.cur_cluster.name}}
++                {{else}}
++                  <a {{bind-attr href=Pcs.clusterController.cur_cluster.url_link}}>{{Pcs.clusterController.cur_cluster.name}}</a> {{{Pcs.clusterController.cur_cluster.quorum_show}}}
++                {{/if}}
++              </td>
++            </tr>
++            {{#if Pcs.clusterController.cur_cluster.error_list}}
++              <tr><td style="text-align:right"><b>Errors:</b>&nbsp;</td><td></td></tr>
+             {{/if}}
+-          </td>
+-        </tr>
+-          {{#if error_list}}
+-          <tr><td style="text-align:right"><b>Errors:</b>&nbsp;</td><td></td></tr>
+-          {{/if}}
+-          {{#each error_list}}
+-          <tr><td></td><td style="color: red;">{{{message}}}</td></tr>
+-          {{/each}}
+-          {{#if warning_list}}
+-          <tr><td style="text-align:right"><b>Warnings:</b>&nbsp;</td><td></td></tr>
+-          {{/if}}
+-          {{#each warning_list}}
+-          <tr><td></td><td style="color: orange;">{{{message}}}</td></tr>
+-          {{/each}}
+-        </table><br>
+-        {{#unless forbidden}}
+-        <table style="clear:left;float:left" class="nodes_list">
+-          <tr>
+-            <td class="datatable_header hover-pointer" onclick="show_hide_dashboard(this, 'nodes');">
+-              <span style="display: none;" class="downarrow sprites"></span>
+-              <span style="" class="rightarrow sprites"></span>
+-              Nodes ({{nodes.length}} | {{#if nodes_failed}}<span style="color: red">issues: {{nodes_failed}}{{else}}<span style="color: green;">OK{{/if}}</span>)
++            {{#each Pcs.clusterController.cur_cluster.error_list}}
++              <tr><td></td><td style="color: red;">{{{message}}}</td></tr>
++            {{/each}}
++            {{#if Pcs.clusterController.cur_cluster.warning_list}}
++              <tr><td style="text-align:right"><b>Warnings:</b>&nbsp;</td><td></td></tr>
++            {{/if}}
++            {{#each Pcs.clusterController.cur_cluster.warning_list}}
++              <tr><td></td><td style="color: orange;">{{{message}}}</td></tr>
++            {{/each}}
++          </table><br>
++          {{#unless Pcs.clusterController.cur_cluster.forbidden}}
++          <table style="clear:left;float:left" class="nodes_list">
++            <tr>
++              <td class="datatable_header hover-pointer" onclick="show_hide_dashboard(this, 'nodes');">
++                <span style="display: none;" class="downarrow sprites"></span>
++                <span style="" class="rightarrow sprites"></span>
++                Nodes ({{Pcs.clusterController.cur_cluster.nodes.length}} | {{#if Pcs.clusterController.cur_cluster.nodes_failed}}<span style="color: red">issues: {{Pcs.clusterController.cur_cluster.nodes_failed}}{{else}}<span style="color: green;">OK{{/if}}</span>)
+               <span style="font-size: 10px;">(displaying {{#if Pcs.clusterController.show_all_nodes}}all{{else}}only issues{{/if}})</span>
+-            </td>
+-          </tr>
+-          <tr>
+-            <td>
+-              <table class="datatable">
+-                <tr>
+-                  <th style="width: 150px;">NODE</th>
+-                  <th style="width: 80px;">STATUS</th>
+-                  <th style="width: 70px;">QUORUM</th>
+-                </tr>
+-                {{#each node in nodes}}
+-                <tr {{bind-attr title=node.tooltip}} {{bind-attr class=node.status_class}}>
+-                  <td><a {{bind-attr href=node.url_link}}>{{node.name}}</a></td>
+-                  <td {{bind-attr style=node.status_style}}>{{{node.status_icon}}}{{node.status}}</td>
+-                  <td>{{{node.quorum_show}}}</td>
+-                </tr>
+-                {{/each}}
+-              </table>
+-            </td>
+-          </tr>
+-        </table>
+-        {{#unless status_unknown}}
+-        <table style="clear:left;float:left" class="resources_list">
+-          <tr>
+-            <td class="datatable_header hover-pointer" onclick="show_hide_dashboard(this, 'resources');">
+-              <span style="display: none;" class="downarrow sprites"></span>
+-              <span style="" class="rightarrow sprites"></span>
+-              Resources ({{resource_list.length}} | {{#if resources_failed}}<span style="color: red">issues: {{resources_failed}}{{else}}<span style="color: green;">OK{{/if}}</span>)
++              </td>
++            </tr>
++            <tr>
++              <td>
++                <table class="datatable">
++                  <tr>
++                    <th style="width: 150px;">NODE</th>
++                    <th style="width: 80px;">STATUS</th>
++                    <th style="width: 70px;">QUORUM</th>
++                  </tr>
++                  {{#each node in Pcs.clusterController.cur_cluster.nodes}}
++                  <tr {{bind-attr title=node.tooltip}} {{bind-attr class=node.status_class}}>
++                    <td><a {{bind-attr href=node.url_link}}>{{node.name}}</a></td>
++                    <td {{bind-attr style=node.status_style}}>{{{node.status_icon}}}{{node.status}}</td>
++                    <td>{{{node.quorum_show}}}</td>
++                  </tr>
++                  {{/each}}
++                </table>
++              </td>
++            </tr>
++          </table>
++          {{#unless Pcs.clusterController.cur_cluster.status_unknown}}
++          <table style="clear:left;float:left" class="resources_list">
++            <tr>
++              <td class="datatable_header hover-pointer" onclick="show_hide_dashboard(this, 'resources');">
++                <span style="display: none;" class="downarrow sprites"></span>
++                <span style="" class="rightarrow sprites"></span>
++                Resources ({{Pcs.clusterController.cur_cluster.resource_list.length}} | {{#if Pcs.clusterController.cur_cluster.resources_failed}}<span style="color: red">issues: {{Pcs.clusterController.cur_cluster.resources_failed}}{{else}}<span style="color: green;">OK{{/if}}</span>)
+               <span style="font-size: 10px;">(displaying {{#if Pcs.clusterController.show_all_resources}}all{{else}}only issues{{/if}})</span>
+-            </td>
+-          </tr>
+-          <tr>
+-            <td>
+-              <table class="datatable">
+-                <tr>
+-                  <th style="width: 150px;">RESOURCE</th>
+-                  <th style="width: 80px;">STATUS</th>
+-                </tr>
+-                {{#each r in resource_list}}
+-                <tr {{bind-attr title=r.tooltip}} {{bind-attr class=r.status_class}}>
+-                  <td><a {{bind-attr href=r.url_link}}>{{r.id}}</a></td>
+-                  <td {{bind-attr style=r.status_style}}>{{{r.status_icon}}}{{r.status}}</td>
+-                </tr>
+-                {{else}}
+-                <tr>
+-                  <td>No resources</td>
+-                  <td></td>
+-                </tr>
+-                {{/each}}
+-              </table>
+-            </td>
+-          </tr>
+-        </table>
+-        <table style="clear:left;float:left" class="fence_list">
+-          <tr>
+-            <td class="datatable_header hover-pointer" onclick="show_hide_dashboard(this, 'fence');">
+-              <span style="display: none;" class="downarrow sprites"></span>
+-              <span style="" class="rightarrow sprites"></span>
+-              Fence-devices ({{fence_list.length}} | {{#if fence_failed}}<span style="color: red">issues: {{fence_failed}}{{else}}<span style="color: green;">OK{{/if}}</span>)
++              </td>
++            </tr>
++            <tr>
++              <td>
++                <table class="datatable">
++                  <tr>
++                    <th style="width: 150px;">RESOURCE</th>
++                    <th style="width: 80px;">STATUS</th>
++                  </tr>
++                  {{#each r in Pcs.clusterController.cur_cluster.resource_list}}
++                  <tr {{bind-attr title=r.tooltip}} {{bind-attr class=r.status_class}}>
++                    <td><a {{bind-attr href=r.url_link}}>{{r.id}}</a></td>
++                    <td {{bind-attr style=r.status_style}}>{{{r.status_icon}}}{{r.status}}</td>
++                  </tr>
++                  {{else}}
++                  <tr>
++                    <td>No resources</td>
++                    <td></td>
++                  </tr>
++                  {{/each}}
++                </table>
++              </td>
++            </tr>
++          </table>
++          <table style="clear:left;float:left" class="fence_list">
++            <tr>
++              <td class="datatable_header hover-pointer" onclick="show_hide_dashboard(this, 'fence');">
++                <span style="display: none;" class="downarrow sprites"></span>
++                <span style="" class="rightarrow sprites"></span>
++                Fence-devices ({{Pcs.clusterController.cur_cluster.fence_list.length}} | {{#if Pcs.clusterController.cur_cluster.fence_failed}}<span style="color: red">issues: {{Pcs.clusterController.cur_cluster.fence_failed}}{{else}}<span style="color: green;">OK{{/if}}</span>)
+               <span style="font-size: 10px;">(displaying {{#if Pcs.clusterController.show_all_fence}}all{{else}}only issues{{/if}})</span>
+-            </td>
+-          </tr>
+-          <tr>
+-            <td>
+-              <table class="datatable">
+-                <tr>
+-                  <th style="width: 150px;">FENCE-DEVICE</th>
+-                  <th style="width: 80px;">STATUS</th>
+-                </tr>
+-                {{#each f in fence_list}}
+-                <tr {{bind-attr title=f.tooltip}} {{bind-attr class=f.status_class_fence}}>
+-                  <td><a {{bind-attr href=f.url_link}}>{{f.id}}</a></td>
+-                  <td {{bind-attr style=f.status_style}}>{{{f.status_icon}}}{{f.status}}</td>
+-                </tr>
+-                {{else}}
+-                <tr>
+-                  <td>No fence devices</td>
+-                  <td></td>
+-                </tr>
+-                {{/each}}
+-              </table>
+-            </td>
+-          </tr>
+-        </table>
+-        {{/unless}}
+-        {{/unless}}
+-	  </div>
+-	{{/each}}
++              </td>
++            </tr>
++            <tr>
++              <td>
++                <table class="datatable">
++                  <tr>
++                    <th style="width: 150px;">FENCE-DEVICE</th>
++                    <th style="width: 80px;">STATUS</th>
++                  </tr>
++                  {{#each f in Pcs.clusterController.cur_cluster.fence_list}}
++                  <tr {{bind-attr title=f.tooltip}} {{bind-attr class=f.status_class_fence}}>
++                    <td><a {{bind-attr href=f.url_link}}>{{f.id}}</a></td>
++                    <td {{bind-attr style=f.status_style}}>{{{f.status_icon}}}{{f.status}}</td>
++                  </tr>
++                  {{else}}
++                  <tr>
++                    <td>No fence devices</td>
++                    <td></td>
++                  </tr>
++                  {{/each}}
++                </table>
++              </td>
++            </tr>
++          </table>
++          {{/unless}}
++          {{/unless}}
++        </div>
++        {{else}}
++        <div id="no_cluster_selected">Select a cluster to view more detailed cluster information</div>
++        {{/if}}
+       </div>
+     </td>
+   </tr>
+-- 
+1.9.1
+

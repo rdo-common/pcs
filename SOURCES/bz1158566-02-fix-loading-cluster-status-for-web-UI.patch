@@ -1,0 +1,143 @@
+From f55ca2f12c4552fcd516737fa797cf806aa70705 Mon Sep 17 00:00:00 2001
+From: Ondrej Mular <omular@redhat.com>
+Date: Thu, 3 Sep 2015 12:29:37 +0200
+Subject: [PATCH] fix loading cluster status for web UI
+
+---
+ pcs/status.py          | 37 ++++++++++++++++++++++++++++++++++---
+ pcsd/cluster_entity.rb | 25 ++++++++++++++++++++++---
+ pcsd/pcs.rb            |  3 +++
+ 3 files changed, 59 insertions(+), 6 deletions(-)
+
+diff --git a/pcs/status.py b/pcs/status.py
+index eb2a5eb..34354ef 100644
+--- a/pcs/status.py
++++ b/pcs/status.py
+@@ -123,14 +123,28 @@ def nodes_status(argv):
+     onlinenodes = []
+     offlinenodes = []
+     standbynodes = []
++    remote_onlinenodes = []
++    remote_offlinenodes = []
++    remote_standbynodes = []
+     for node in nodes[0].getElementsByTagName("node"):
++        node_name = node.getAttribute("name")
++        node_remote = node.getAttribute("type") == "remote"
+         if node.getAttribute("online") == "true":
+             if node.getAttribute("standby") == "true":
+-                standbynodes.append(node.getAttribute("name"))
++                if node_remote:
++                    remote_standbynodes.append(node_name)
++                else:
++                    standbynodes.append(node_name)
+             else:
+-                onlinenodes.append(node.getAttribute("name"))
++                if node_remote:
++                    remote_onlinenodes.append(node_name)
++                else:
++                    onlinenodes.append(node_name)
+         else:
+-            offlinenodes.append(node.getAttribute("name"))
++            if node_remote:
++                remote_offlinenodes.append(node_name)
++            else:
++                offlinenodes.append(node_name)
+ 
+     print "Pacemaker Nodes:"
+ 
+@@ -149,6 +163,23 @@ def nodes_status(argv):
+         print node,
+     print ""
+ 
++    print "Pacemaker Remote Nodes:"
++
++    print " Online:",
++    for node in remote_onlinenodes:
++        print node,
++    print ""
++
++    print " Standby:",
++    for node in remote_standbynodes:
++        print node,
++    print ""
++
++    print " Offline:",
++    for node in remote_offlinenodes:
++        print node,
++    print ""
++
+ # TODO: Remove, currently unused, we use status from the resource.py
+ def resources_status(argv):
+     info_dom = utils.getClusterState()
+diff --git a/pcsd/cluster_entity.rb b/pcsd/cluster_entity.rb
+index 78bc5ab..4f751b8 100644
+--- a/pcsd/cluster_entity.rb
++++ b/pcsd/cluster_entity.rb
+@@ -533,7 +533,8 @@ module ClusterEntity
+       @operations = []
+       failed_ops = []
+       message_list = []
+-      cib_dom.elements.each("//lrm_resource[@id='#{@id}']/lrm_rsc_op") { |e|
++      cib_dom.elements.each("//lrm_resource[@id='#{@id}']/lrm_rsc_op | "\
++      + "//lrm_resource[starts-with(@id, \"#{@id}:\")]/lrm_rsc_op") { |e|
+         operation = ResourceOperation.new(e)
+         @operations << operation
+         if operation.rc_code != 0
+@@ -819,13 +820,15 @@ module ClusterEntity
+           primitive_list = @member.members
+         end
+         @masters, @slaves = get_masters_slaves(primitive_list)
+-        if @masters.empty?
+-          @error_list << {
++        if @masters.empty? and !disabled?
++          @status = ClusterEntity::ResourceStatus.new(:partially_running)
++          @warning_list << {
+             :message => 'Resource is master/slave but has not been promoted '\
+               + 'to master on any node.',
+             :type => 'no_master'
+           }
+         end
++        @status = @member.status if @status < @member.status
+       end
+     end
+ 
+@@ -851,6 +854,22 @@ module ClusterEntity
+       end
+     end
+ 
++    def update_status
++      if @member
++        @member.update_status
++        if @member.instance_of?(Primitive)
++          primitive_list = [@member]
++        else
++          primitive_list = @member.members
++        end
++        @masters, @slaves = get_masters_slaves(primitive_list)
++        if @masters.empty? and !disabled?
++          @status = ClusterEntity::ResourceStatus.new(:partially_running)
++        end
++        @status = @member.status if @status < @member.status
++      end
++    end
++
+     private
+     def get_masters_slaves(primitive_list)
+       masters = []
+diff --git a/pcsd/pcs.rb b/pcsd/pcs.rb
+index cc5b038..87404ac 100644
+--- a/pcsd/pcs.rb
++++ b/pcsd/pcs.rb
+@@ -568,6 +568,9 @@ def get_nodes_status()
+     if l.start_with?("Pacemaker Nodes:")
+       in_pacemaker = true
+     end
++    if l.start_with?("Pacemaker Remote Nodes:")
++      break
++    end
+     if l.end_with?(":")
+       next
+     end
+-- 
+1.9.1
+

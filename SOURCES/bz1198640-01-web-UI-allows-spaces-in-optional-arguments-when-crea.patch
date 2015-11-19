@@ -1,0 +1,36 @@
+From 906780d7d61fef803c5e1adfa9d156e07e67c26a Mon Sep 17 00:00:00 2001
+From: Ondrej Mular <omular@redhat.com>
+Date: Tue, 15 Sep 2015 11:14:04 +0200
+Subject: [PATCH] web UI: allows spaces in optional arguments when creating new
+ resource
+
+---
+ pcsd/public/js/pcsd.js | 7 +++----
+ 1 file changed, 3 insertions(+), 4 deletions(-)
+
+diff --git a/pcsd/public/js/pcsd.js b/pcsd/public/js/pcsd.js
+index cddf14e..84db292 100644
+--- a/pcsd/public/js/pcsd.js
++++ b/pcsd/public/js/pcsd.js
+@@ -284,15 +284,14 @@ function disable_spaces(item) {
+ }
+ 
+ function load_resource_form(item, ra, stonith) {
+-  data = { "new": true, resourcename: ra};
++  var data = { new: true, resourcename: ra};
++  var command;
+   if (!stonith)
+     command = "resource_metadata";
+   else
+     command = "fence_device_metadata";
+   
+-  item.load(get_cluster_remote_url() + command, data, function() {
+-    disable_spaces(this);
+-  });
++  item.load(get_cluster_remote_url() + command, data);
+ }
+ 
+ function update_resource_form_groups(form, group_list) {
+-- 
+1.9.1
+

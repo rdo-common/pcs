@@ -1,0 +1,26 @@
+From 25a4636078b869779cc6adfac3368a9fc382496d Mon Sep 17 00:00:00 2001
+From: Tomas Jelinek <tojeline@redhat.com>
+Date: Mon, 7 Sep 2015 16:42:02 +0200
+Subject: [PATCH] fix checking user's group membership
+
+---
+ pcsd/pcsd.rb | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/pcsd/pcsd.rb b/pcsd/pcsd.rb
+index da47fb2..9a07ee8 100644
+--- a/pcsd/pcsd.rb
++++ b/pcsd/pcsd.rb
+@@ -120,8 +120,7 @@ $thread_cfgsync = Thread.new {
+ 
+ helpers do
+   def protected!
+-    PCSAuth.loginByToken(session, cookies) if not PCSAuth.isLoggedIn(session)
+-    if not PCSAuth.isLoggedIn(session)
++    if not PCSAuth.loginByToken(session, cookies) and not PCSAuth.isLoggedIn(session)
+       # If we're on /managec/<cluster_name>/main we redirect
+       match_expr = "/managec/(.*)/(.*)"
+       mymatch = request.path.match(match_expr)
+-- 
+1.9.1
+

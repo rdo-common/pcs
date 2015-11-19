@@ -1,0 +1,25 @@
+From 7572aa0033e2d027685807e0f7d49be86e36ee50 Mon Sep 17 00:00:00 2001
+From: Tomas Jelinek <tojeline@redhat.com>
+Date: Tue, 11 Aug 2015 16:08:50 +0200
+Subject: [PATCH] fix 'Add Resource' form in web UI
+
+---
+ pcsd/views/resourceagentform.erb | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/pcsd/views/resourceagentform.erb b/pcsd/views/resourceagentform.erb
+index bccc689..039023e 100644
+--- a/pcsd/views/resourceagentform.erb
++++ b/pcsd/views/resourceagentform.erb
+@@ -68,7 +68,7 @@ nodes in Slave mode.") %>'>
+ 	<input type="hidden" name="resource_id" value="<%=@cur_resource.id%>">
+       <% end %>
+ 
+-      <input type="hidden" name="resource_type" value="<%=@resource.type%>">
++      <input type="hidden" name="resource_type" value="<%=@resource.name%>">
+       <% @resource.required_options.each { |name, desc|  %>
+ 	<tr title="<%=h(desc[1])%>">
+ 	  <td class="reg">
+-- 
+1.9.1
+
