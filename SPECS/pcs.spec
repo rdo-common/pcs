@@ -9,6 +9,7 @@ BuildRequires: python2-devel
 Summary: Pacemaker Configuration System	
 Source0: https://tojeline.fedorapeople.org/pkgs/pcs/pcs-withgems-%{version}.tar.gz
 Source1: HAM-logo.png
+Source2: favicon.ico
 Patch0: bz1122818-01-fix-resource-relocation-of-globally-unique-clones.patch
 Patch1: bz1158577-01-improve-logging-in-pcsd.patch
 Patch2: bz1189857-01-fix-Add-Resource-form-in-web-UI.patch
@@ -74,7 +75,8 @@ easily view, modify and created pacemaker based clusters.
 %autosetup -p1 -S git
 
 cp -f %SOURCE1 pcsd/public/images
-
+cp -f %SOURCE2 pcsd/public
+ 
 %build
 
 %install
@@ -116,6 +118,9 @@ chmod 755 $RPM_BUILD_ROOT/%{python_sitelib}/pcs/pcs.py
 %doc COPYING README
 
 %changelog
+* Tue Aug 23 2016 Johnny Hughes <johnny@centos.org> - 0.9.143-15.el7.centos
+- Roll in CentOS Branding (centos bug #9426)
+
 * Wed Oct 21 2015 Tomas Jelinek <tojeline@redhat.com> - 0.9.143-15
 - Fixed setting cluster properties in web UI
 - Resolves: rhbz#1272412
