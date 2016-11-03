@@ -1,0 +1,62 @@
+From 0f305d7d54b40fe13b1ef2134701b5169fe79d65 Mon Sep 17 00:00:00 2001
+From: Tomas Jelinek <tojeline@redhat.com>
+Date: Thu, 30 Jun 2016 17:23:19 +0200
+Subject: [PATCH] add a wrapper for holding SELinux context when pcsd is
+ started by systemd
+
+---
+ Makefile                 |  3 +++
+ pcsd/pcsd.service        |  2 +-
+ pcsd/pcsd.service-runner | 13 +++++++++++++
+ 3 files changed, 17 insertions(+), 1 deletion(-)
+ create mode 100644 pcsd/pcsd.service-runner
+
+diff --git a/Makefile b/Makefile
+index de216ce..f0a5d03 100644
+--- a/Makefile
++++ b/Makefile
+@@ -126,6 +126,9 @@ else
+   ifeq ($(IS_SYSTEMCTL),true)
+ 	install -d ${DESTDIR}/${systemddir}/system/
+ 	install -m 644 pcsd/pcsd.service ${DESTDIR}/${systemddir}/system/
++# ${DESTDIR}${PREFIX}/lib/pcsd/pcsd holds the selinux context
++	install -m 755 pcsd/pcsd.service-runner ${DESTDIR}${PREFIX}/lib/pcsd/pcsd
++	rm ${DESTDIR}${PREFIX}/lib/pcsd/pcsd.service-runner
+   else
+ 	install -m 755 -D pcsd/pcsd ${DESTDIR}/${initdir}/pcsd
+   endif
+diff --git a/pcsd/pcsd.service b/pcsd/pcsd.service
+index 075a3a6..e506f1b 100644
+--- a/pcsd/pcsd.service
++++ b/pcsd/pcsd.service
+@@ -4,7 +4,7 @@ Description=PCS GUI and remote configuration interface
+ [Service]
+ EnvironmentFile=/etc/sysconfig/pcsd
+ Environment=GEM_HOME=/usr/lib/pcsd/vendor/bundle/ruby
+-ExecStart=/usr/bin/ruby -C/var/lib/pcsd -I/usr/lib/pcsd -- /usr/lib/pcsd/ssl.rb > /dev/null &
++ExecStart=/usr/lib/pcsd/pcsd > /dev/null &
+ 
+ [Install]
+ WantedBy=multi-user.target
+diff --git a/pcsd/pcsd.service-runner b/pcsd/pcsd.service-runner
+new file mode 100644
+index 0000000..1949a68
+--- /dev/null
++++ b/pcsd/pcsd.service-runner
+@@ -0,0 +1,13 @@
++#!/usr/bin/ruby
++# this file is a pcsd runner callable from a systemd unit
++# it also serves as a holder of a selinux context
++
++# add pcsd to the load path (ruby -I)
++libdir = File.dirname(__FILE__)
++$LOAD_PATH.unshift(libdir) unless $LOAD_PATH.include?(libdir)
++
++# change current directory (ruby -C)
++Dir.chdir('/var/lib/pcsd')
++
++# import and run pcsd
++require 'ssl'
+-- 
+1.8.3.1
+

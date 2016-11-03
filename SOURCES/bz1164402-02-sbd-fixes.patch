@@ -1,0 +1,1621 @@
+From e43d7324b9fc6933d8fa431e66c6236721724b98 Mon Sep 17 00:00:00 2001
+From: Ivan Devat <idevat@redhat.com>
+Date: Fri, 19 Aug 2016 02:57:38 +0200
+Subject: [PATCH] squash bz1164402 Support for sbd configuration is
+
+f2da8ad476c3 fix disable_service
+
+9367e7162b7b fix code formating
+
+57b618777d14 test: fix tests with parallel operations in SBD
+
+f7b9fc15072c sbd: change error message
+
+0dbdff4628d5 sbd: fix setting watchdog in config
+
+1c5ccd3be588 sbd: ban changing sbd option SBD_PACEMAKER
+
+733e28337589 sbd: add validation for SBD_WATCHDOG_TIMEOUT option
+
+9951f3262ef1 docs: add watchdog option to node add command
+
+d79592e05158 lib: fix disabling service on systemd systems
+
+17e4c5838842 sbd: set auto_tie_breaker whenever it is needed for SBD to work
+
+1ed4c2e3bc38 lib: fix enabled ATB in corosync.conf detection
+---
+ pcs/cluster.py                              |  54 +++++-
+ pcs/common/report_codes.py                  |   4 +-
+ pcs/lib/commands/quorum.py                  |  41 ++++-
+ pcs/lib/commands/sbd.py                     |  30 ++-
+ pcs/lib/corosync/config_facade.py           |  15 +-
+ pcs/lib/external.py                         |   4 +-
+ pcs/lib/reports.py                          |  27 +++
+ pcs/lib/sbd.py                              |  78 +++++++-
+ pcs/pcs.8                                   |   4 +-
+ pcs/quorum.py                               |   3 +-
+ pcs/stonith.py                              |   4 +-
+ pcs/test/test_lib_commands_quorum.py        | 205 ++++++++++++++++++++-
+ pcs/test/test_lib_commands_sbd.py           | 134 +++++++++++++-
+ pcs/test/test_lib_corosync_config_facade.py |  28 +++
+ pcs/test/test_lib_external.py               |  22 ++-
+ pcs/test/test_lib_sbd.py                    | 272 +++++++++++++++++++++++++++-
+ pcs/usage.py                                |   3 +
+ pcs/utils.py                                |  25 ++-
+ pcsd/pcs.rb                                 |  10 +-
+ 19 files changed, 908 insertions(+), 55 deletions(-)
+
+diff --git a/pcs/cluster.py b/pcs/cluster.py
+index 90fec63..577e08e 100644
+--- a/pcs/cluster.py
++++ b/pcs/cluster.py
+@@ -43,6 +43,7 @@ from pcs.lib import (
+     reports as lib_reports,
+ )
+ from pcs.lib.booth import sync as booth_sync
++from pcs.lib.nodes_task import check_corosync_offline_on_nodes
+ from pcs.lib.commands.quorum import _add_device_model_net
+ from pcs.lib.corosync import (
+     config_parser as corosync_conf_utils,
+@@ -1328,6 +1329,36 @@ def get_cib(argv):
+         except IOError as e:
+             utils.err("Unable to write to file '%s', %s" % (filename, e.strerror))
+ 
++
++def _ensure_cluster_is_offline_if_atb_should_be_enabled(
++    lib_env, node_num_modifier, skip_offline_nodes=False
++):
++    """
++    Check if cluster is offline if auto tie breaker should be enabled.
++    Raises LibraryError if ATB needs to be enabled cluster is not offline.
++
++    lib_env -- LibraryEnvironment
++    node_num_modifier -- number which wil be added to the number of nodes in
++        cluster when determining whenever ATB is needed.
++    skip_offline_nodes -- if True offline nodes will be skipped
++    """
++    corosync_conf = lib_env.get_corosync_conf()
++    if lib_sbd.atb_has_to_be_enabled(
++        lib_env.cmd_runner(), corosync_conf, node_num_modifier
++    ):
++        print(
++            "Warning: auto_tie_breaker quorum option will be enabled to make "
++            "SBD fencing effecive after this change. Cluster has to be offline "
++            "to be able to make this change."
++        )
++        check_corosync_offline_on_nodes(
++            lib_env.node_communicator(),
++            lib_env.report_processor,
++            corosync_conf.get_nodes(),
++            skip_offline_nodes
++        )
++
++
+ def cluster_node(argv):
+     if len(argv) != 2:
+         usage.cluster()
+@@ -1363,6 +1394,9 @@ def cluster_node(argv):
+                 msg += ", use --force to override"
+             utils.err(msg)
+ 
++    lib_env = utils.get_lib_env()
++    modifiers = utils.get_modificators()
++
+     if add_node == True:
+         wait = False
+         wait_timeout = None
+@@ -1385,11 +1419,9 @@ def cluster_node(argv):
+         if not canAdd:
+             utils.err("Unable to add '%s' to cluster: %s" % (node0, error))
+ 
+-        lib_env = utils.get_lib_env()
+         report_processor = lib_env.report_processor
+         node_communicator = lib_env.node_communicator()
+         node_addr = NodeAddresses(node0, node1)
+-        modifiers = utils.get_modificators()
+         try:
+             if lib_sbd.is_sbd_enabled(utils.cmd_runner()):
+                 if "--watchdog" not in utils.pcs_options:
+@@ -1400,6 +1432,10 @@ def cluster_node(argv):
+                 else:
+                     watchdog = utils.pcs_options["--watchdog"][0]
+ 
++                _ensure_cluster_is_offline_if_atb_should_be_enabled(
++                    lib_env, 1, modifiers["skip_offline_nodes"]
++                )
++
+                 report_processor.process(lib_reports.sbd_check_started())
+                 lib_sbd.check_sbd_on_node(
+                     report_processor, node_communicator, node_addr, watchdog
+@@ -1407,12 +1443,15 @@ def cluster_node(argv):
+                 sbd_cfg = environment_file_to_dict(
+                     lib_sbd.get_local_sbd_config()
+                 )
+-                sbd_cfg["SBD_WATCHDOG_DEV"] = watchdog
+                 report_processor.process(
+                     lib_reports.sbd_config_distribution_started()
+                 )
+                 lib_sbd.set_sbd_config_on_node(
+-                    report_processor, node_communicator, node_addr, sbd_cfg
++                    report_processor,
++                    node_communicator,
++                    node_addr,
++                    sbd_cfg,
++                    watchdog
+                 )
+                 report_processor.process(lib_reports.sbd_enabling_started())
+                 lib_sbd.enable_sbd_service_on_node(
+@@ -1549,6 +1588,13 @@ def cluster_node(argv):
+                 )
+             # else the node seems to be stopped already, we're ok to proceed
+ 
++        try:
++            _ensure_cluster_is_offline_if_atb_should_be_enabled(
++                lib_env, -1, modifiers["skip_offline_nodes"]
++            )
++        except LibraryError as e:
++            utils.process_library_reports(e.args)
++
+         nodesRemoved = False
+         c_nodes = utils.getNodesFromCorosyncConf()
+         destroy_cluster([node0], keep_going=("--force" in utils.pcs_options))
+diff --git a/pcs/common/report_codes.py b/pcs/common/report_codes.py
+index e71d418..672c2e3 100644
+--- a/pcs/common/report_codes.py
++++ b/pcs/common/report_codes.py
+@@ -10,9 +10,9 @@ FORCE_ACTIVE_RRP = "ACTIVE_RRP"
+ FORCE_ALERT_RECIPIENT_VALUE_NOT_UNIQUE = "FORCE_ALERT_RECIPIENT_VALUE_NOT_UNIQUE"
+ FORCE_BOOTH_REMOVE_FROM_CIB = "FORCE_BOOTH_REMOVE_FROM_CIB"
+ FORCE_BOOTH_DESTROY = "FORCE_BOOTH_DESTROY"
+-FORCE_FILE_OVERWRITE = "FORCE_FILE_OVERWRITE"
+ FORCE_CONSTRAINT_DUPLICATE = "CONSTRAINT_DUPLICATE"
+ FORCE_CONSTRAINT_MULTIINSTANCE_RESOURCE = "CONSTRAINT_MULTIINSTANCE_RESOURCE"
++FORCE_FILE_OVERWRITE = "FORCE_FILE_OVERWRITE"
+ FORCE_LOAD_THRESHOLD = "LOAD_THRESHOLD"
+ FORCE_OPTIONS = "OPTIONS"
+ FORCE_QDEVICE_MODEL = "QDEVICE_MODEL"
+@@ -81,6 +81,7 @@ COROSYNC_NOT_RUNNING_CHECK_STARTED = "COROSYNC_NOT_RUNNING_CHECK_STARTED"
+ COROSYNC_NOT_RUNNING_CHECK_NODE_ERROR = "COROSYNC_NOT_RUNNING_CHECK_NODE_ERROR"
+ COROSYNC_NOT_RUNNING_ON_NODE = "COROSYNC_NOT_RUNNING_ON_NODE"
+ COROSYNC_OPTIONS_INCOMPATIBLE_WITH_QDEVICE = "COROSYNC_OPTIONS_INCOMPATIBLE_WITH_QDEVICE"
++COROSYNC_QUORUM_CANNOT_DISABLE_ATB_DUE_TO_SBD = "COROSYNC_QUORUM_CANNOT_DISABLE_ATB_DUE_TO_SBD"
+ COROSYNC_QUORUM_GET_STATUS_ERROR = "COROSYNC_QUORUM_GET_STATUS_ERROR"
+ COROSYNC_QUORUM_SET_EXPECTED_VOTES_ERROR = "COROSYNC_QUORUM_SET_EXPECTED_VOTES_ERROR"
+ COROSYNC_RUNNING_ON_NODE = "COROSYNC_RUNNING_ON_NODE"
+@@ -179,5 +180,6 @@ UNABLE_TO_GET_SBD_CONFIG = "UNABLE_TO_GET_SBD_CONFIG"
+ UNABLE_TO_GET_SBD_STATUS = "UNABLE_TO_GET_SBD_STATUS"
+ UNKNOWN_COMMAND = 'UNKNOWN_COMMAND'
+ UNSUPPORTED_AGENT = 'UNSUPPORTED_AGENT'
++WATCHDOG_INVALID = "WATCHDOG_INVALID"
+ UNSUPPORTED_OPERATION_ON_NON_SYSTEMD_SYSTEMS = "UNSUPPORTED_OPERATION_ON_NON_SYSTEMD_SYSTEMS"
+ WATCHDOG_NOT_FOUND = "WATCHDOG_NOT_FOUND"
+diff --git a/pcs/lib/commands/quorum.py b/pcs/lib/commands/quorum.py
+index 7425e78..7fb7bb4 100644
+--- a/pcs/lib/commands/quorum.py
++++ b/pcs/lib/commands/quorum.py
+@@ -5,8 +5,9 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from pcs.lib import reports
+-from pcs.lib.errors import LibraryError
++from pcs.common import report_codes
++from pcs.lib import reports, sbd
++from pcs.lib.errors import LibraryError, ReportItemSeverity
+ from pcs.lib.corosync import (
+     live as corosync_live,
+     qdevice_net,
+@@ -39,16 +40,50 @@ def get_config(lib_env):
+         "device": device,
+     }
+ 
+-def set_options(lib_env, options, skip_offline_nodes=False):
++
++def _check_if_atb_can_be_disabled(
++    runner, report_processor, corosync_conf, was_enabled, force=False
++):
++    """
++    Check whenever auto_tie_breaker can be changed without affecting SBD.
++    Raises LibraryError if change of ATB will affect SBD functionality.
++
++    runner -- CommandRunner
++    report_processor -- report processor
++    corosync_conf -- corosync conf facade
++    was_enabled -- True if ATB was enabled, False otherwise
++    force -- force change
++    """
++    if (
++        was_enabled
++        and
++        not corosync_conf.is_enabled_auto_tie_breaker()
++        and
++        sbd.is_auto_tie_breaker_needed(runner, corosync_conf)
++    ):
++        report_processor.process(reports.quorum_cannot_disable_atb_due_to_sbd(
++            ReportItemSeverity.WARNING if force else ReportItemSeverity.ERROR,
++            None if force else report_codes.FORCE_OPTIONS
++        ))
++
++
++def set_options(lib_env, options, skip_offline_nodes=False, force=False):
+     """
+     Set corosync quorum options, distribute and reload corosync.conf if live
+     lib_env LibraryEnvironment
+     options quorum options (dict)
+     skip_offline_nodes continue even if not all nodes are accessible
++    bool force force changes
+     """
+     __ensure_not_cman(lib_env)
+     cfg = lib_env.get_corosync_conf()
++    atb_enabled = cfg.is_enabled_auto_tie_breaker()
+     cfg.set_quorum_options(lib_env.report_processor, options)
++    if lib_env.is_corosync_conf_live:
++        _check_if_atb_can_be_disabled(
++            lib_env.cmd_runner(), lib_env.report_processor,
++            cfg, atb_enabled, force
++        )
+     lib_env.push_corosync_conf(cfg, skip_offline_nodes)
+ 
+ def status_text(lib_env):
+diff --git a/pcs/lib/commands/sbd.py b/pcs/lib/commands/sbd.py
+index 875758f..265ebb5 100644
+--- a/pcs/lib/commands/sbd.py
++++ b/pcs/lib/commands/sbd.py
+@@ -5,6 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
++import os
+ import json
+ 
+ from pcs import settings
+@@ -44,7 +45,9 @@ def _validate_sbd_options(sbd_config, allow_unknown_opts=False):
+     """
+ 
+     report_item_list = []
+-    unsupported_sbd_option_list = ["SBD_WATCHDOG_DEV", "SBD_OPTS"]
++    unsupported_sbd_option_list = [
++        "SBD_WATCHDOG_DEV", "SBD_OPTS", "SBD_PACEMAKER"
++    ]
+     allowed_sbd_options = [
+         "SBD_DELAY_START", "SBD_STARTMODE", "SBD_WATCHDOG_TIMEOUT"
+     ]
+@@ -62,6 +65,17 @@ def _validate_sbd_options(sbd_config, allow_unknown_opts=False):
+                 Severities.WARNING if allow_unknown_opts else Severities.ERROR,
+                 None if allow_unknown_opts else report_codes.FORCE_OPTIONS
+             ))
++    if "SBD_WATCHDOG_TIMEOUT" in sbd_config:
++        report_item = reports.invalid_option_value(
++            "SBD_WATCHDOG_TIMEOUT",
++            sbd_config["SBD_WATCHDOG_TIMEOUT"],
++            "nonnegative integer"
++        )
++        try:
++            if int(sbd_config["SBD_WATCHDOG_TIMEOUT"]) < 0:
++                report_item_list.append(report_item)
++        except (ValueError, TypeError):
++            report_item_list.append(report_item)
+ 
+     return report_item_list
+ 
+@@ -81,6 +95,9 @@ def _get_full_watchdog_list(node_list, default_watchdog, watchdog_dict):
+     report_item_list = []
+ 
+     for node_name, watchdog in watchdog_dict.items():
++        if not watchdog or not os.path.isabs(watchdog):
++            report_item_list.append(reports.invalid_watchdog_path(watchdog))
++            continue
+         try:
+             full_dict[node_list.find_by_label(node_name)] = watchdog
+         except NodeNotFound:
+@@ -140,6 +157,14 @@ def enable_sbd(
+         full_watchdog_dict
+     )
+ 
++    # enable ATB if needed
++    corosync_conf = lib_env.get_corosync_conf()
++    if sbd.atb_has_to_be_enabled(lib_env.cmd_runner(), corosync_conf):
++        corosync_conf.set_quorum_options(
++            lib_env.report_processor, {"auto_tie_breaker": "1"}
++        )
++        lib_env.push_corosync_conf(corosync_conf, ignore_offline_nodes)
++
+     # distribute SBD configuration
+     config = sbd.get_default_sbd_config()
+     config.update(sbd_options)
+@@ -147,7 +172,8 @@ def enable_sbd(
+         lib_env.report_processor,
+         lib_env.node_communicator(),
+         online_nodes,
+-        config
++        config,
++        full_watchdog_dict
+     )
+ 
+     # remove cluster prop 'stonith_watchdog_timeout'
+diff --git a/pcs/lib/corosync/config_facade.py b/pcs/lib/corosync/config_facade.py
+index 600a89b..be621c0 100644
+--- a/pcs/lib/corosync/config_facade.py
++++ b/pcs/lib/corosync/config_facade.py
+@@ -129,6 +129,16 @@ class ConfigFacade(object):
+                     options[name] = value
+         return options
+ 
++    def is_enabled_auto_tie_breaker(self):
++        """
++        Returns True if auto tie braker option is enabled, False otherwise.
++        """
++        auto_tie_breaker = "0"
++        for quorum in self.config.get_sections("quorum"):
++            for attr in quorum.get_attributes("auto_tie_breaker"):
++                auto_tie_breaker = attr[1]
++        return auto_tie_breaker == "1"
++
+     def __validate_quorum_options(self, options):
+         report_items = []
+         has_qdevice = self.has_quorum_device()
+@@ -488,10 +498,7 @@ class ConfigFacade(object):
+         # get relevant status
+         has_quorum_device = self.has_quorum_device()
+         has_two_nodes = len(self.get_nodes()) == 2
+-        auto_tie_breaker = False
+-        for quorum in self.config.get_sections("quorum"):
+-            for attr in quorum.get_attributes("auto_tie_breaker"):
+-                auto_tie_breaker = attr[1] != "0"
++        auto_tie_breaker = self.is_enabled_auto_tie_breaker()
+         # update two_node
+         if has_two_nodes and not auto_tie_breaker and not has_quorum_device:
+             quorum_section_list = self.__ensure_section(self.config, "quorum")
+diff --git a/pcs/lib/external.py b/pcs/lib/external.py
+index 25e071f..08bf2bb 100644
+--- a/pcs/lib/external.py
++++ b/pcs/lib/external.py
+@@ -135,13 +135,13 @@ def disable_service(runner, service, instance=None):
+     instance -- instance name, it ha no effect on not systemd systems.
+         If None no instance name will be used.
+     """
++    if not is_service_installed(runner, service):
++        return
+     if is_systemctl():
+         output, retval = runner.run([
+             "systemctl", "disable", _get_service_name(service, instance)
+         ])
+     else:
+-        if not is_service_installed(runner, service):
+-            return
+         output, retval = runner.run(["chkconfig", service, "off"])
+     if retval != 0:
+         raise DisableServiceError(service, output.rstrip(), instance)
+diff --git a/pcs/lib/reports.py b/pcs/lib/reports.py
+index eac95c7..568bb7e 100644
+--- a/pcs/lib/reports.py
++++ b/pcs/lib/reports.py
+@@ -1701,6 +1701,19 @@ def watchdog_not_found(node, watchdog):
+     )
+ 
+ 
++def invalid_watchdog_path(watchdog):
++    """
++    watchdog path is not absolut path
++
++    watchdog -- watchdog device path
++    """
++    return ReportItem.error(
++        report_codes.WATCHDOG_INVALID,
++        "Watchdog path '{watchdog}' is invalid.",
++        info={"watchdog": watchdog}
++    )
++
++
+ def unable_to_get_sbd_status(node, reason):
+     """
+     there was (communication or parsing) failure during obtaining status of SBD
+@@ -1901,3 +1914,17 @@ def live_environment_required(forbidden_options):
+             "options_string": ", ".join(forbidden_options),
+         }
+     )
++
++
++def quorum_cannot_disable_atb_due_to_sbd(
++    severity=ReportItemSeverity.ERROR, forceable=None
++):
++    """
++    Quorum option auto_tie_breaker cannot be disbled due to SBD.
++    """
++    return ReportItem(
++        report_codes.COROSYNC_QUORUM_CANNOT_DISABLE_ATB_DUE_TO_SBD,
++        severity,
++        "unable to disable auto_tie_breaker: SBD fencing will have no effect",
++        forceable=forceable
++    )
+diff --git a/pcs/lib/sbd.py b/pcs/lib/sbd.py
+index 4488a73..c9f013b 100644
+--- a/pcs/lib/sbd.py
++++ b/pcs/lib/sbd.py
+@@ -46,6 +46,50 @@ def _run_parallel_and_raise_lib_error_on_failure(func, param_list):
+         raise LibraryError(*report_list)
+ 
+ 
++def is_auto_tie_breaker_needed(
++    runner, corosync_conf_facade, node_number_modifier=0
++):
++    """
++    Returns True whenever quorum option auto tie breaker is needed to be enabled
++    for proper working of SBD fencing. False if it is not needed.
++
++    runner -- command runner
++    corosync_conf_facade --
++    node_number_modifier -- this value vill be added to current number of nodes.
++        This can be useful to test whenever is ATB needed when adding/removeing
++        node.
++    """
++    return (
++        not corosync_conf_facade.has_quorum_device()
++        and
++        (len(corosync_conf_facade.get_nodes()) + node_number_modifier) % 2 == 0
++        and
++        is_sbd_installed(runner)
++        and
++        is_sbd_enabled(runner)
++    )
++
++def atb_has_to_be_enabled(runner, corosync_conf_facade, node_number_modifier=0):
++    """
++    Return True whenever quorum option auto tie breaker has to be enabled for
++    proper working of SBD fencing. False if it's not needed or it is already
++    enabled.
++
++    runner -- command runner
++    corosync_conf_facade --
++    node_number_modifier -- this value vill be added to current number of nodes.
++        This can be useful to test whenever is ATB needed when adding/removeing
++        node.
++    """
++    return (
++        is_auto_tie_breaker_needed(
++            runner, corosync_conf_facade, node_number_modifier
++        )
++        and
++        not corosync_conf_facade.is_enabled_auto_tie_breaker()
++    )
++
++
+ def check_sbd(communicator, node, watchdog):
+     """
+     Check SBD on specified 'node' and existence of specified watchdog.
+@@ -123,18 +167,23 @@ def set_sbd_config(communicator, node, config):
+     )
+ 
+ 
+-def set_sbd_config_on_node(report_processor, node_communicator, node, config):
++def set_sbd_config_on_node(
++    report_processor, node_communicator, node, config, watchdog
++):
+     """
+-    Send SBD configuration to 'node'. Also puts correct node name into
+-        SBD_OPTS option (SBD_OPTS="-n <node_name>").
++    Send SBD configuration to 'node' with specified watchdog set. Also puts
++    correct node name into SBD_OPTS option (SBD_OPTS="-n <node_name>").
+ 
+     report_processor --
+     node_communicator -- NodeCommunicator
+     node -- NodeAddresses
+     config -- dictionary in format: <SBD config option>: <value>
++    watchdog -- path to watchdog device
+     """
+     config = dict(config)
+     config["SBD_OPTS"] = '"-n {node_name}"'.format(node_name=node.label)
++    if watchdog:
++        config["SBD_WATCHDOG_DEV"] = watchdog
+     set_sbd_config(node_communicator, node, dict_to_environment_file(config))
+     report_processor.process(
+         reports.sbd_config_accepted_by_node(node.label)
+@@ -142,7 +191,7 @@ def set_sbd_config_on_node(report_processor, node_communicator, node, config):
+ 
+ 
+ def set_sbd_config_on_all_nodes(
+-        report_processor, node_communicator, node_list, config
++    report_processor, node_communicator, node_list, config, watchdog_dict
+ ):
+     """
+     Send SBD configuration 'config' to all nodes in 'node_list'. Option
+@@ -153,12 +202,20 @@ def set_sbd_config_on_all_nodes(
+     node_communicator -- NodeCommunicator
+     node_list -- NodeAddressesList
+     config -- dictionary in format: <SBD config option>: <value>
++    watchdog_dict -- dictionary of watchdogs where key is NodeAdresses object
++        and value is path to watchdog
+     """
+     report_processor.process(reports.sbd_config_distribution_started())
+     _run_parallel_and_raise_lib_error_on_failure(
+         set_sbd_config_on_node,
+         [
+-            ([report_processor, node_communicator, node, config], {})
++            (
++                [
++                    report_processor, node_communicator, node, config,
++                    watchdog_dict.get(node)
++                ],
++                {}
++            )
+             for node in node_list
+         ]
+     )
+@@ -362,3 +419,14 @@ def is_sbd_enabled(runner):
+     runner -- CommandRunner
+     """
+     return external.is_service_enabled(runner, "sbd")
++
++
++def is_sbd_installed(runner):
++    """
++    Check if SBD service is installed in local system.
++    Reurns True id SBD service is installed. False otherwise.
++
++    runner -- CommandRunner
++    """
++    return external.is_service_installed(runner, "sbd")
++
+diff --git a/pcs/pcs.8 b/pcs/pcs.8
+index 9064054..7a054ca 100644
+--- a/pcs/pcs.8
++++ b/pcs/pcs.8
+@@ -271,8 +271,8 @@ Upgrade the CIB to conform to the latest version of the document schema.
+ edit [scope=<scope> | \fB\-\-config\fR]
+ Edit the cib in the editor specified by the $EDITOR environment variable and push out any changes upon saving.  Specify scope to edit a specific section of the CIB.  Valid values of the scope are: configuration, nodes, resources, constraints, crm_config, rsc_defaults, op_defaults.  \fB\-\-config\fR is the same as scope=configuration.  Use of \fB\-\-config\fR is recommended.  Do not specify a scope if you need to edit the whole CIB or be warned in the case of outdated CIB.
+ .TP
+-node add <node[,node\-altaddr]> [\fB\-\-start\fR [\fB\-\-wait\fR[=<n>]]] [\fB\-\-enable\fR]
+-Add the node to corosync.conf and corosync on all nodes in the cluster and sync the new corosync.conf to the new node.  If \fB\-\-start\fR is specified also start corosync/pacemaker on the new node, if \fB\-\-wait\fR is sepcified wait up to 'n' seconds for the new node to start.  If \fB\-\-enable\fR is specified enable corosync/pacemaker on new node.  When using Redundant Ring Protocol (RRP) with udpu transport, specify the ring 0 address first followed by a ',' and then the ring 1 address.
++node add <node[,node\-altaddr]> [\fB\-\-start\fR [\fB\-\-wait\fR[=<n>]]] [\fB\-\-enable\fR] [\fB\-\-watchdog\fR=<watchdog\-path>]
++Add the node to corosync.conf and corosync on all nodes in the cluster and sync the new corosync.conf to the new node.  If \fB\-\-start\fR is specified also start corosync/pacemaker on the new node, if \fB\-\-wait\fR is sepcified wait up to 'n' seconds for the new node to start.  If \fB\-\-enable\fR is specified enable corosync/pacemaker on new node.  When using Redundant Ring Protocol (RRP) with udpu transport, specify the ring 0 address first followed by a ',' and then the ring 1 address. Use \fB\-\-watchdog\fR to specify path to watchdog on newly added node, when SBD is enabled in cluster.
+ .TP
+ node remove <node>
+ Shutdown specified node and remove it from pacemaker and corosync on all other nodes in the cluster.
+diff --git a/pcs/quorum.py b/pcs/quorum.py
+index 1c2d41d..6cd06ca 100644
+--- a/pcs/quorum.py
++++ b/pcs/quorum.py
+@@ -121,7 +121,8 @@ def quorum_update_cmd(lib, argv, modificators):
+ 
+     lib.quorum.set_options(
+         options,
+-        skip_offline_nodes=modificators["skip_offline_nodes"]
++        skip_offline_nodes=modificators["skip_offline_nodes"],
++        force=modificators["force"]
+     )
+ 
+ def quorum_device_add_cmd(lib, argv, modificators):
+diff --git a/pcs/stonith.py b/pcs/stonith.py
+index 93332ef..23f3800 100644
+--- a/pcs/stonith.py
++++ b/pcs/stonith.py
+@@ -495,7 +495,7 @@ def _sbd_parse_watchdogs(watchdog_list):
+     for watchdog_node in watchdog_list:
+         if "@" not in watchdog_node:
+             if default_watchdog:
+-                raise CmdLineInputError("Multiple default watchdogs.")
++                raise CmdLineInputError("Multiple watchdog definitions.")
+             default_watchdog = watchdog_node
+         else:
+             watchdog, node_name = watchdog_node.rsplit("@", 1)
+@@ -553,7 +553,7 @@ def sbd_config(lib, argv, modifiers):
+ 
+     config = config_list[0]["config"]
+ 
+-    filtered_options = ["SBD_WATCHDOG_DEV", "SBD_OPTS"]
++    filtered_options = ["SBD_WATCHDOG_DEV", "SBD_OPTS", "SBD_PACEMAKER"]
+     for key, val in config.items():
+         if key in filtered_options:
+             continue
+diff --git a/pcs/test/test_lib_commands_quorum.py b/pcs/test/test_lib_commands_quorum.py
+index 826251a..d286a8f 100644
+--- a/pcs/test/test_lib_commands_quorum.py
++++ b/pcs/test/test_lib_commands_quorum.py
+@@ -25,6 +25,7 @@ from pcs.lib.errors import (
+     LibraryError,
+     ReportItemSeverity as severity,
+ )
++from pcs.lib.corosync.config_facade import ConfigFacade
+ from pcs.lib.external import NodeCommunicationException
+ from pcs.lib.node import NodeAddresses, NodeAddressesList
+ 
+@@ -146,23 +147,201 @@ class GetQuorumConfigTest(TestCase, CmanMixin):
+         self.assertEqual([], self.mock_reporter.report_item_list)
+ 
+ 
++@mock.patch("pcs.lib.sbd.is_auto_tie_breaker_needed")
++class CheckIfAtbCanBeDisabledTest(TestCase):
++    def setUp(self):
++        self.mock_reporter = MockLibraryReportProcessor()
++        self.mock_runner = "cmd_runner"
++        self.mock_corosync_conf = mock.MagicMock(spec_set=ConfigFacade)
++
++    def test_atb_no_need_was_disabled_atb_disabled(self, mock_atb_needed):
++        mock_atb_needed.return_value = False
++        self.mock_corosync_conf.is_enabled_auto_tie_breaker.return_value = False
++        lib._check_if_atb_can_be_disabled(
++            self.mock_runner, self.mock_reporter, self.mock_corosync_conf, False
++        )
++        self.assertEqual([], self.mock_reporter.report_item_list)
++
++    def test_atb_no_need_was_disabled_atb_enabled(self, mock_atb_needed):
++        mock_atb_needed.return_value = False
++        self.mock_corosync_conf.is_enabled_auto_tie_breaker.return_value = True
++        lib._check_if_atb_can_be_disabled(
++            self.mock_runner, self.mock_reporter, self.mock_corosync_conf, False
++        )
++        self.assertEqual([], self.mock_reporter.report_item_list)
++
++    def test_atb_no_need_was_enable_atb_disabled(self, mock_atb_needed):
++        mock_atb_needed.return_value = False
++        self.mock_corosync_conf.is_enabled_auto_tie_breaker.return_value = False
++        lib._check_if_atb_can_be_disabled(
++            self.mock_runner, self.mock_reporter, self.mock_corosync_conf, True
++        )
++        self.assertEqual([], self.mock_reporter.report_item_list)
++
++    def test_atb_no_need_was_enabled_atb_enabled(self, mock_atb_needed):
++        mock_atb_needed.return_value = False
++        self.mock_corosync_conf.is_enabled_auto_tie_breaker.return_value = True
++        lib._check_if_atb_can_be_disabled(
++            self.mock_runner, self.mock_reporter, self.mock_corosync_conf, True
++        )
++        self.assertEqual([], self.mock_reporter.report_item_list)
++
++    def test_atb_needed_was_disabled_atb_disabled(self, mock_atb_needed):
++        mock_atb_needed.return_value = True
++        self.mock_corosync_conf.is_enabled_auto_tie_breaker.return_value = False
++        lib._check_if_atb_can_be_disabled(
++            self.mock_runner, self.mock_reporter, self.mock_corosync_conf, False
++        )
++        self.assertEqual([], self.mock_reporter.report_item_list)
++
++    def test_atb_needed_was_disabled_atb_enabled(self, mock_atb_needed):
++        mock_atb_needed.return_value = True
++        self.mock_corosync_conf.is_enabled_auto_tie_breaker.return_value = True
++        lib._check_if_atb_can_be_disabled(
++            self.mock_runner, self.mock_reporter, self.mock_corosync_conf, False
++        )
++        self.assertEqual([], self.mock_reporter.report_item_list)
++
++    def test_atb_needed_was_enable_atb_disabled(self, mock_atb_needed):
++        mock_atb_needed.return_value = True
++        self.mock_corosync_conf.is_enabled_auto_tie_breaker.return_value = False
++        report_item = (
++            severity.ERROR,
++            report_codes.COROSYNC_QUORUM_CANNOT_DISABLE_ATB_DUE_TO_SBD,
++            {},
++            report_codes.FORCE_OPTIONS
++        )
++        assert_raise_library_error(
++            lambda: lib._check_if_atb_can_be_disabled(
++                self.mock_runner,
++                self.mock_reporter,
++                self.mock_corosync_conf,
++                True
++            ),
++            report_item
++        )
++        assert_report_item_list_equal(
++            self.mock_reporter.report_item_list, [report_item]
++        )
++
++    def test_atb_needed_was_enabled_atb_enabled(self, mock_atb_needed):
++        mock_atb_needed.return_value = True
++        self.mock_corosync_conf.is_enabled_auto_tie_breaker.return_value = True
++        lib._check_if_atb_can_be_disabled(
++            self.mock_runner, self.mock_reporter, self.mock_corosync_conf, True
++        )
++        self.assertEqual([], self.mock_reporter.report_item_list)
++
++
++    def test_atb_no_need_was_disabled_atb_disabled_force(
++        self, mock_atb_needed
++    ):
++        mock_atb_needed.return_value = False
++        self.mock_corosync_conf.is_enabled_auto_tie_breaker.return_value = False
++        lib._check_if_atb_can_be_disabled(
++            self.mock_runner, self.mock_reporter, self.mock_corosync_conf,
++            False, force=True
++        )
++        self.assertEqual([], self.mock_reporter.report_item_list)
++
++    def test_atb_no_need_was_disabled_atb_enabled_force(
++        self, mock_atb_needed
++    ):
++        mock_atb_needed.return_value = False
++        self.mock_corosync_conf.is_enabled_auto_tie_breaker.return_value = True
++        lib._check_if_atb_can_be_disabled(
++            self.mock_runner, self.mock_reporter, self.mock_corosync_conf,
++            False, force=True
++        )
++        self.assertEqual([], self.mock_reporter.report_item_list)
++
++    def test_atb_no_need_was_enable_atb_disabled_force(self, mock_atb_needed):
++        mock_atb_needed.return_value = False
++        self.mock_corosync_conf.is_enabled_auto_tie_breaker.return_value = False
++        lib._check_if_atb_can_be_disabled(
++            self.mock_runner, self.mock_reporter, self.mock_corosync_conf, True,
++            force=True
++        )
++        self.assertEqual([], self.mock_reporter.report_item_list)
++
++    def test_atb_no_need_was_enabled_atb_enabled_force(self, mock_atb_needed):
++        mock_atb_needed.return_value = False
++        self.mock_corosync_conf.is_enabled_auto_tie_breaker.return_value = True
++        lib._check_if_atb_can_be_disabled(
++            self.mock_runner, self.mock_reporter, self.mock_corosync_conf, True,
++            force=True
++        )
++        self.assertEqual([], self.mock_reporter.report_item_list)
++
++    def test_atb_needed_was_disabled_atb_disabled_force(
++        self, mock_atb_needed
++    ):
++        mock_atb_needed.return_value = True
++        self.mock_corosync_conf.is_enabled_auto_tie_breaker.return_value = False
++        lib._check_if_atb_can_be_disabled(
++            self.mock_runner, self.mock_reporter, self.mock_corosync_conf,
++            False, force=True
++        )
++        self.assertEqual([], self.mock_reporter.report_item_list)
++
++    def test_atb_needed_was_disabled_atb_enabled_force(self, mock_atb_needed):
++        mock_atb_needed.return_value = True
++        self.mock_corosync_conf.is_enabled_auto_tie_breaker.return_value = True
++        lib._check_if_atb_can_be_disabled(
++            self.mock_runner, self.mock_reporter, self.mock_corosync_conf,
++            False, force=True
++        )
++        self.assertEqual([], self.mock_reporter.report_item_list)
++
++    def test_atb_needed_was_enable_atb_disabled_force(self, mock_atb_needed):
++        mock_atb_needed.return_value = True
++        self.mock_corosync_conf.is_enabled_auto_tie_breaker.return_value = False
++        lib._check_if_atb_can_be_disabled(
++            self.mock_runner, self.mock_reporter, self.mock_corosync_conf, True,
++            force=True
++        )
++        assert_report_item_list_equal(
++            self.mock_reporter.report_item_list,
++            [(
++                severity.WARNING,
++                report_codes.COROSYNC_QUORUM_CANNOT_DISABLE_ATB_DUE_TO_SBD,
++                {},
++                None
++            )]
++        )
++
++    def test_atb_needed_was_enabled_atb_enabled_force(self, mock_atb_needed):
++        mock_atb_needed.return_value = True
++        self.mock_corosync_conf.is_enabled_auto_tie_breaker.return_value = True
++        lib._check_if_atb_can_be_disabled(
++            self.mock_runner, self.mock_reporter, self.mock_corosync_conf, True,
++            force=True
++        )
++        self.assertEqual([], self.mock_reporter.report_item_list)
++
++
++@mock.patch("pcs.lib.commands.quorum._check_if_atb_can_be_disabled")
+ @mock.patch.object(LibraryEnvironment, "push_corosync_conf")
+ @mock.patch.object(LibraryEnvironment, "get_corosync_conf_data")
++@mock.patch.object(LibraryEnvironment, "cmd_runner")
+ class SetQuorumOptionsTest(TestCase, CmanMixin):
+     def setUp(self):
+         self.mock_logger = mock.MagicMock(logging.Logger)
+         self.mock_reporter = MockLibraryReportProcessor()
+ 
+     @mock.patch("pcs.lib.env.is_cman_cluster", lambda self: True)
+-    def test_disabled_on_cman(self, mock_get_corosync, mock_push_corosync):
++    def test_disabled_on_cman(
++        self, mock_runner, mock_get_corosync, mock_push_corosync, mock_check
++    ):
+         lib_env = LibraryEnvironment(self.mock_logger, self.mock_reporter)
+         self.assert_disabled_on_cman(lambda: lib.set_options(lib_env, {}))
+         mock_get_corosync.assert_not_called()
+         mock_push_corosync.assert_not_called()
++        mock_check.assert_not_called()
+ 
+     @mock.patch("pcs.lib.env.is_cman_cluster", lambda self: True)
+     def test_enabled_on_cman_if_not_live(
+-        self, mock_get_corosync, mock_push_corosync
++        self, mock_runner, mock_get_corosync, mock_push_corosync, mock_check
+     ):
+         original_conf = "invalid {\nconfig: stop after cman test"
+         mock_get_corosync.return_value = original_conf
+@@ -182,11 +361,16 @@ class SetQuorumOptionsTest(TestCase, CmanMixin):
+         )
+ 
+         mock_push_corosync.assert_not_called()
++        mock_check.assert_not_called()
++        mock_runner.assert_not_called()
+ 
+     @mock.patch("pcs.lib.env.is_cman_cluster", lambda self: False)
+-    def test_success(self, mock_get_corosync, mock_push_corosync):
++    def test_success(
++        self, mock_runner, mock_get_corosync, mock_push_corosync, mock_check
++    ):
+         original_conf = open(rc("corosync-3nodes.conf")).read()
+         mock_get_corosync.return_value = original_conf
++        mock_runner.return_value = "cmd_runner"
+         lib_env = LibraryEnvironment(self.mock_logger, self.mock_reporter)
+ 
+         new_options = {"wait_for_all": "1"}
+@@ -201,9 +385,16 @@ class SetQuorumOptionsTest(TestCase, CmanMixin):
+             )
+         )
+         self.assertEqual([], self.mock_reporter.report_item_list)
++        self.assertEqual(1, mock_check.call_count)
++        self.assertEqual("cmd_runner", mock_check.call_args[0][0])
++        self.assertEqual(self.mock_reporter, mock_check.call_args[0][1])
++        self.assertFalse(mock_check.call_args[0][3])
++        self.assertFalse(mock_check.call_args[0][4])
+ 
+     @mock.patch("pcs.lib.env.is_cman_cluster", lambda self: False)
+-    def test_bad_options(self, mock_get_corosync, mock_push_corosync):
++    def test_bad_options(
++        self, mock_runner, mock_get_corosync, mock_push_corosync, mock_check
++    ):
+         original_conf = open(rc("corosync.conf")).read()
+         mock_get_corosync.return_value = original_conf
+         lib_env = LibraryEnvironment(self.mock_logger, self.mock_reporter)
+@@ -228,9 +419,12 @@ class SetQuorumOptionsTest(TestCase, CmanMixin):
+         )
+ 
+         mock_push_corosync.assert_not_called()
++        mock_check.assert_not_called()
+ 
+     @mock.patch("pcs.lib.env.is_cman_cluster", lambda self: False)
+-    def test_bad_config(self, mock_get_corosync, mock_push_corosync):
++    def test_bad_config(
++        self, mock_runner, mock_get_corosync, mock_push_corosync, mock_check
++    ):
+         original_conf = "invalid {\nconfig: this is"
+         mock_get_corosync.return_value = original_conf
+         lib_env = LibraryEnvironment(self.mock_logger, self.mock_reporter)
+@@ -246,6 +440,7 @@ class SetQuorumOptionsTest(TestCase, CmanMixin):
+         )
+ 
+         mock_push_corosync.assert_not_called()
++        mock_check.assert_not_called()
+ 
+ 
+ @mock.patch("pcs.lib.commands.quorum.corosync_live.get_quorum_status_text")
+diff --git a/pcs/test/test_lib_commands_sbd.py b/pcs/test/test_lib_commands_sbd.py
+index 9a96757..0663082 100644
+--- a/pcs/test/test_lib_commands_sbd.py
++++ b/pcs/test/test_lib_commands_sbd.py
+@@ -35,6 +35,15 @@ from pcs.lib.external import (
+ import pcs.lib.commands.sbd as cmd_sbd
+ 
+ 
++def _assert_equal_list_of_dictionaries_without_order(expected, actual):
++    for item in actual:
++        if item not in expected:
++            raise AssertionError("Given but not expected: {0}".format(item))
++    for item in expected:
++        if item not in actual:
++            raise AssertionError("Expected but not given: {0}".format(item))
++
++
+ class CommandSbdTest(TestCase):
+     def setUp(self):
+         self.mock_env = mock.MagicMock(spec_set=LibraryEnvironment)
+@@ -234,7 +243,8 @@ class ValidateSbdOptionsTest(TestCase):
+             "SBD_STARTMODE": "clean",
+             "SBD_WATCHDOG_DEV": "/dev/watchdog",
+             "SBD_UNKNOWN": "",
+-            "SBD_OPTS": "  "
++            "SBD_OPTS": "  ",
++            "SBD_PACEMAKER": "false",
+         }
+ 
+         assert_report_item_list_equal(
+@@ -272,6 +282,90 @@ class ValidateSbdOptionsTest(TestCase):
+                         "allowed_str": self.allowed_sbd_options_str
+                     },
+                     None
++                ),
++                (
++                    Severities.ERROR,
++                    report_codes.INVALID_OPTION,
++                    {
++                        "option_name": "SBD_PACEMAKER",
++                        "option_type": None,
++                        "allowed": self.allowed_sbd_options,
++                        "allowed_str": self.allowed_sbd_options_str
++                    },
++                    None
++                )
++            ]
++        )
++
++    def test_watchdog_timeout_is_not_present(self):
++        config = {
++            "SBD_DELAY_START": "yes",
++            "SBD_STARTMODE": "clean"
++        }
++        self.assertEqual([], cmd_sbd._validate_sbd_options(config))
++
++    def test_watchdog_timeout_is_nonnegative_int(self):
++        config = {
++            "SBD_WATCHDOG_TIMEOUT": "-1",
++        }
++
++        assert_report_item_list_equal(
++            cmd_sbd._validate_sbd_options(config),
++            [
++                (
++                    Severities.ERROR,
++                    report_codes.INVALID_OPTION_VALUE,
++                    {
++                        "option_name": "SBD_WATCHDOG_TIMEOUT",
++                        "option_value": "-1",
++                        "allowed_values": "nonnegative integer",
++                        "allowed_values_str": "nonnegative integer",
++                    },
++                    None
++                )
++            ]
++        )
++
++    def test_watchdog_timeout_is_not_int(self):
++        config = {
++            "SBD_WATCHDOG_TIMEOUT": "not int",
++        }
++
++        assert_report_item_list_equal(
++            cmd_sbd._validate_sbd_options(config),
++            [
++                (
++                    Severities.ERROR,
++                    report_codes.INVALID_OPTION_VALUE,
++                    {
++                        "option_name": "SBD_WATCHDOG_TIMEOUT",
++                        "option_value": "not int",
++                        "allowed_values": "nonnegative integer",
++                        "allowed_values_str": "nonnegative integer",
++                    },
++                    None
++                )
++            ]
++        )
++
++    def test_watchdog_timeout_is_none(self):
++        config = {
++            "SBD_WATCHDOG_TIMEOUT": None,
++        }
++
++        assert_report_item_list_equal(
++            cmd_sbd._validate_sbd_options(config),
++            [
++                (
++                    Severities.ERROR,
++                    report_codes.INVALID_OPTION_VALUE,
++                    {
++                        "option_name": "SBD_WATCHDOG_TIMEOUT",
++                        "option_value": None,
++                        "allowed_values": "nonnegative integer",
++                        "allowed_values_str": "nonnegative integer",
++                    },
++                    None
+                 )
+             ]
+         )
+@@ -325,6 +419,35 @@ class GetFullWatchdogListTest(TestCase):
+             )
+         )
+ 
++    def test_invalid_watchdogs(self):
++        watchdog_dict = {
++            self.node_list[1].label: "",
++            self.node_list[2].label: None,
++            self.node_list[3].label: "not/abs/path",
++            self.node_list[4].label: "/dev/watchdog"
++
++        }
++        assert_raise_library_error(
++            lambda: cmd_sbd._get_full_watchdog_list(
++                self.node_list, "/dev/dog", watchdog_dict
++            ),
++            (
++                Severities.ERROR,
++                report_codes.WATCHDOG_INVALID,
++                {"watchdog": ""}
++            ),
++            (
++                Severities.ERROR,
++                report_codes.WATCHDOG_INVALID,
++                {"watchdog": None}
++            ),
++            (
++                Severities.ERROR,
++                report_codes.WATCHDOG_INVALID,
++                {"watchdog": "not/abs/path"}
++            )
++        )
++
+ 
+ @mock.patch("pcs.lib.commands.sbd._get_cluster_nodes")
+ @mock.patch("pcs.lib.sbd.check_sbd")
+@@ -393,8 +516,7 @@ class GetClusterSbdStatusTest(CommandSbdTest):
+                 }
+             }
+         ]
+-
+-        self.assertEqual(
++        _assert_equal_list_of_dictionaries_without_order(
+             expected, cmd_sbd.get_cluster_sbd_status(self.mock_env)
+         )
+         mock_get_nodes.assert_called_once_with(self.mock_env)
+@@ -447,7 +569,7 @@ class GetClusterSbdStatusTest(CommandSbdTest):
+             }
+         ]
+ 
+-        self.assertEqual(
++        _assert_equal_list_of_dictionaries_without_order(
+             expected, cmd_sbd.get_cluster_sbd_status(self.mock_env)
+         )
+         mock_get_nodes.assert_called_once_with(self.mock_env)
+@@ -538,7 +660,7 @@ OPTION=   value
+             }
+         ]
+ 
+-        self.assertEqual(
++        _assert_equal_list_of_dictionaries_without_order(
+             expected, cmd_sbd.get_cluster_sbd_config(self.mock_env)
+         )
+         mock_get_nodes.assert_called_once_with(self.mock_env)
+@@ -589,7 +711,7 @@ invalid value
+             }
+         ]
+ 
+-        self.assertEqual(
++        _assert_equal_list_of_dictionaries_without_order(
+             expected, cmd_sbd.get_cluster_sbd_config(self.mock_env)
+         )
+         mock_get_nodes.assert_called_once_with(self.mock_env)
+diff --git a/pcs/test/test_lib_corosync_config_facade.py b/pcs/test/test_lib_corosync_config_facade.py
+index 4a35fd9..91f7b40 100644
+--- a/pcs/test/test_lib_corosync_config_facade.py
++++ b/pcs/test/test_lib_corosync_config_facade.py
+@@ -281,6 +281,34 @@ quorum {
+         self.assertFalse(facade.need_qdevice_reload)
+ 
+ 
++class IsEnabledAutoTieBreaker(TestCase):
++    def test_enabled(self):
++        config = """\
++quorum {
++    auto_tie_breaker: 1
++}
++"""
++        facade = lib.ConfigFacade.from_string(config)
++        self.assertTrue(facade.is_enabled_auto_tie_breaker())
++
++    def test_disabled(self):
++        config = """\
++quorum {
++    auto_tie_breaker: 0
++}
++"""
++        facade = lib.ConfigFacade.from_string(config)
++        self.assertFalse(facade.is_enabled_auto_tie_breaker())
++
++    def test_no_value(self):
++        config = """\
++quorum {
++}
++"""
++        facade = lib.ConfigFacade.from_string(config)
++        self.assertFalse(facade.is_enabled_auto_tie_breaker())
++
++
+ class SetQuorumOptionsTest(TestCase):
+     def get_two_node(self, facade):
+         two_node = None
+diff --git a/pcs/test/test_lib_external.py b/pcs/test/test_lib_external.py
+index a4ec0f9..b0ffdbb 100644
+--- a/pcs/test/test_lib_external.py
++++ b/pcs/test/test_lib_external.py
+@@ -1012,12 +1012,14 @@ Copyright (c) 2006-2009 Red Hat, Inc.
+ 
+ 
+ @mock.patch("pcs.lib.external.is_systemctl")
++@mock.patch("pcs.lib.external.is_service_installed")
+ class DisableServiceTest(TestCase):
+     def setUp(self):
+         self.mock_runner = mock.MagicMock(spec_set=lib.CommandRunner)
+         self.service = "service_name"
+ 
+-    def test_systemctl(self, mock_systemctl):
++    def test_systemctl(self, mock_is_installed, mock_systemctl):
++        mock_is_installed.return_value = True
+         mock_systemctl.return_value = True
+         self.mock_runner.run.return_value = ("", 0)
+         lib.disable_service(self.mock_runner, self.service)
+@@ -1025,7 +1027,8 @@ class DisableServiceTest(TestCase):
+             ["systemctl", "disable", self.service + ".service"]
+         )
+ 
+-    def test_systemctl_failed(self, mock_systemctl):
++    def test_systemctl_failed(self, mock_is_installed, mock_systemctl):
++        mock_is_installed.return_value = True
+         mock_systemctl.return_value = True
+         self.mock_runner.run.return_value = ("", 1)
+         self.assertRaises(
+@@ -1036,7 +1039,6 @@ class DisableServiceTest(TestCase):
+             ["systemctl", "disable", self.service + ".service"]
+         )
+ 
+-    @mock.patch("pcs.lib.external.is_service_installed")
+     def test_not_systemctl(self, mock_is_installed, mock_systemctl):
+         mock_is_installed.return_value = True
+         mock_systemctl.return_value = False
+@@ -1046,7 +1048,6 @@ class DisableServiceTest(TestCase):
+             ["chkconfig", self.service, "off"]
+         )
+ 
+-    @mock.patch("pcs.lib.external.is_service_installed")
+     def test_not_systemctl_failed(self, mock_is_installed, mock_systemctl):
+         mock_is_installed.return_value = True
+         mock_systemctl.return_value = False
+@@ -1059,7 +1060,14 @@ class DisableServiceTest(TestCase):
+             ["chkconfig", self.service, "off"]
+         )
+ 
+-    @mock.patch("pcs.lib.external.is_service_installed")
++    def test_systemctl_not_installed(
++            self, mock_is_installed, mock_systemctl
++    ):
++        mock_is_installed.return_value = False
++        mock_systemctl.return_value = True
++        lib.disable_service(self.mock_runner, self.service)
++        self.assertEqual(self.mock_runner.run.call_count, 0)
++
+     def test_not_systemctl_not_installed(
+             self, mock_is_installed, mock_systemctl
+     ):
+@@ -1068,7 +1076,8 @@ class DisableServiceTest(TestCase):
+         lib.disable_service(self.mock_runner, self.service)
+         self.assertEqual(self.mock_runner.run.call_count, 0)
+ 
+-    def test_instance_systemctl(self, mock_systemctl):
++    def test_instance_systemctl(self, mock_is_installed, mock_systemctl):
++        mock_is_installed.return_value = True
+         mock_systemctl.return_value = True
+         self.mock_runner.run.return_value = ("", 0)
+         lib.disable_service(self.mock_runner, self.service, instance="test")
+@@ -1078,7 +1087,6 @@ class DisableServiceTest(TestCase):
+             "{0}@{1}.service".format(self.service, "test")
+         ])
+ 
+-    @mock.patch("pcs.lib.external.is_service_installed")
+     def test_instance_not_systemctl(self, mock_is_installed, mock_systemctl):
+         mock_is_installed.return_value = True
+         mock_systemctl.return_value = False
+diff --git a/pcs/test/test_lib_sbd.py b/pcs/test/test_lib_sbd.py
+index e3c1401..fd29484 100644
+--- a/pcs/test/test_lib_sbd.py
++++ b/pcs/test/test_lib_sbd.py
+@@ -28,6 +28,7 @@ from pcs.lib.external import (
+     NodeConnectionException,
+ )
+ import pcs.lib.sbd as lib_sbd
++from pcs.lib.corosync.config_facade import ConfigFacade as CorosyncConfigFacade
+ 
+ 
+ class TestException(Exception):
+@@ -85,6 +86,246 @@ class RunParallelAndRaiseLibErrorOnFailureTest(TestCase):
+         )
+ 
+ 
++@mock.patch("pcs.lib.sbd.is_sbd_installed")
++@mock.patch("pcs.lib.sbd.is_sbd_enabled")
++class IsAutoTieBreakerNeededTest(TestCase):
++    def setUp(self):
++        self.runner = "runner"
++        self.mock_corosync_conf = mock.MagicMock(spec_set=CorosyncConfigFacade)
++
++    def _set_ret_vals(self, nodes, qdevice):
++        self.mock_corosync_conf.get_nodes.return_value = nodes
++        self.mock_corosync_conf.has_quorum_device.return_value = qdevice
++
++    def test_sbd_enabled_even_nodes_has_qdevice(
++        self, mock_enabled, mock_installed
++    ):
++        mock_enabled.return_value = True
++        mock_installed.return_value = True
++        self._set_ret_vals([1, 2], True)
++        self.assertFalse(lib_sbd.is_auto_tie_breaker_needed(
++            self.runner, self.mock_corosync_conf
++        ))
++
++    def test_sbd_enabled_even_nodes_no_qdevice(
++        self, mock_enabled, mock_installed
++    ):
++        mock_enabled.return_value = True
++        mock_installed.return_value = True
++        self._set_ret_vals([1, 2], False)
++        self.assertTrue(lib_sbd.is_auto_tie_breaker_needed(
++            self.runner, self.mock_corosync_conf
++        ))
++
++    def test_sbd_not_installed_even_nodes_no_qdevice(
++        self, mock_enabled, mock_installed
++    ):
++        mock_enabled.return_value = False
++        mock_installed.return_value = False
++        self._set_ret_vals([1, 2], False)
++        self.assertFalse(lib_sbd.is_auto_tie_breaker_needed(
++            self.runner, self.mock_corosync_conf
++        ))
++
++    def test_sbd_enabled_odd_nodes_has_qdevice(
++        self, mock_enabled, mock_installed
++    ):
++        mock_enabled.return_value = True
++        mock_installed.return_value = True
++        self._set_ret_vals([1, 2, 3], True)
++        self.assertFalse(lib_sbd.is_auto_tie_breaker_needed(
++            self.runner, self.mock_corosync_conf
++        ))
++
++    def test_sbd_enabled_odd_nodes_no_qdevice(
++        self, mock_enabled, mock_installed
++    ):
++        mock_enabled.return_value = True
++        mock_installed.return_value = True
++        self._set_ret_vals([1, 2, 3], False)
++        self.assertFalse(lib_sbd.is_auto_tie_breaker_needed(
++            self.runner, self.mock_corosync_conf
++        ))
++
++    def test_sbd_disabled_even_nodes_has_qdevice(
++        self, mock_enabled, mock_installed
++    ):
++        mock_enabled.return_value = False
++        mock_installed.return_value = True
++        self._set_ret_vals([1, 2], True)
++        self.assertFalse(lib_sbd.is_auto_tie_breaker_needed(
++            self.runner, self.mock_corosync_conf
++        ))
++
++    def test_sbd_disabled_even_nodes_no_qdevice(
++        self, mock_enabled, mock_installed
++    ):
++        mock_enabled.return_value = False
++        mock_installed.return_value = True
++        self._set_ret_vals([1, 2], False)
++        self.assertFalse(lib_sbd.is_auto_tie_breaker_needed(
++            self.runner, self.mock_corosync_conf
++        ))
++
++    def test_sbd_disabled_odd_nodes_has_qdevice(
++        self, mock_enabled, mock_installed
++    ):
++        mock_enabled.return_value = False
++        mock_installed.return_value = True
++        self._set_ret_vals([1, 2, 3], True)
++        self.assertFalse(lib_sbd.is_auto_tie_breaker_needed(
++            self.runner, self.mock_corosync_conf
++        ))
++
++    def test_sbd_disabled_odd_nodes_no_qdevice(
++        self, mock_enabled, mock_installed
++    ):
++        mock_enabled.return_value = False
++        mock_installed.return_value = True
++        self._set_ret_vals([1, 2, 3], False)
++        self.assertFalse(lib_sbd.is_auto_tie_breaker_needed(
++            self.runner, self.mock_corosync_conf
++        ))
++
++    def test_sbd_enabled_odd_nodes_no_qdevice_plus_node(
++        self, mock_enabled, mock_installed
++    ):
++        mock_enabled.return_value = True
++        mock_installed.return_value = True
++        self._set_ret_vals([1, 2, 3], False)
++        self.assertTrue(lib_sbd.is_auto_tie_breaker_needed(
++            self.runner, self.mock_corosync_conf, 1
++        ))
++
++    def test_sbd_not_installed_odd_nodes_no_qdevice_plus_node(
++        self, mock_enabled, mock_installed
++    ):
++        mock_enabled.return_value = False
++        mock_installed.return_value = False
++        self._set_ret_vals([1, 2, 3], False)
++        self.assertFalse(lib_sbd.is_auto_tie_breaker_needed(
++            self.runner, self.mock_corosync_conf, 1
++        ))
++
++    def test_sbd_enabled_odd_nodes_no_qdevice_minus_node(
++        self, mock_enabled, mock_installed
++    ):
++        mock_enabled.return_value = True
++        mock_installed.return_value = True
++        self._set_ret_vals([1, 2, 3], False)
++        self.assertTrue(lib_sbd.is_auto_tie_breaker_needed(
++            self.runner, self.mock_corosync_conf, -1
++        ))
++
++    def test_sbd_enabled_odd_nodes_no_qdevice_plus_2_nodes(
++        self, mock_enabled, mock_installed
++    ):
++        mock_enabled.return_value = True
++        mock_installed.return_value = True
++        self._set_ret_vals([1, 2, 3], False)
++        self.assertFalse(lib_sbd.is_auto_tie_breaker_needed(
++            self.runner, self.mock_corosync_conf, 2
++        ))
++
++    def test_sbd_enabled_odd_nodes_no_qdevice_minus_2_nodes(
++        self, mock_enabled, mock_installed
++    ):
++        mock_enabled.return_value = True
++        mock_installed.return_value = True
++        self._set_ret_vals([1, 2, 3], False)
++        self.assertFalse(lib_sbd.is_auto_tie_breaker_needed(
++            self.runner, self.mock_corosync_conf, -2
++        ))
++
++    def test_sbd_enabled_even_nodes_no_qdevice_plus_node(
++        self, mock_enabled, mock_installed
++    ):
++        mock_enabled.return_value = True
++        mock_installed.return_value = True
++        self._set_ret_vals([1, 2], False)
++        self.assertFalse(lib_sbd.is_auto_tie_breaker_needed(
++            self.runner, self.mock_corosync_conf, 1
++        ))
++
++    def test_sbd_enabled_even_nodes_no_qdevice_minus_node(
++        self, mock_enabled, mock_installed
++    ):
++        mock_enabled.return_value = True
++        mock_installed.return_value = True
++        self._set_ret_vals([1, 2], False)
++        self.assertFalse(lib_sbd.is_auto_tie_breaker_needed(
++            self.runner, self.mock_corosync_conf, -1
++        ))
++
++    def test_sbd_enabled_even_nodes_no_qdevice_plus_2_nodes(
++        self, mock_enabled, mock_installed
++    ):
++        mock_enabled.return_value = True
++        mock_installed.return_value = True
++        self._set_ret_vals([1, 2], False)
++        self.assertTrue(lib_sbd.is_auto_tie_breaker_needed(
++            self.runner, self.mock_corosync_conf, 2
++        ))
++
++    def test_sbd_enabled_even_nodes_no_qdevice_minus_2_nodes(
++        self, mock_enabled, mock_installed
++    ):
++        mock_enabled.return_value = True
++        mock_installed.return_value = True
++        self._set_ret_vals([1, 2, 3, 4], False)
++        self.assertTrue(lib_sbd.is_auto_tie_breaker_needed(
++            self.runner, self.mock_corosync_conf, -2
++        ))
++
++
++@mock.patch("pcs.lib.sbd.is_auto_tie_breaker_needed")
++class AtbHasToBeEnabledTest(TestCase):
++    def setUp(self):
++        self.mock_runner = "runner"
++        self.mock_conf = mock.MagicMock(spec_set=CorosyncConfigFacade)
++
++    def test_atb_needed_is_enabled(self, mock_is_needed):
++        mock_is_needed.return_value = True
++        self.mock_conf.is_enabled_auto_tie_breaker.return_value = True
++        self.assertFalse(lib_sbd.atb_has_to_be_enabled(
++            self.mock_runner, self.mock_conf, 1
++        ))
++        mock_is_needed.assert_called_once_with(
++            self.mock_runner, self.mock_conf, 1
++        )
++
++    def test_atb_needed_is_disabled(self, mock_is_needed):
++        mock_is_needed.return_value = True
++        self.mock_conf.is_enabled_auto_tie_breaker.return_value = False
++        self.assertTrue(lib_sbd.atb_has_to_be_enabled(
++            self.mock_runner, self.mock_conf, -1
++        ))
++        mock_is_needed.assert_called_once_with(
++            self.mock_runner, self.mock_conf, -1
++        )
++
++    def test_atb_not_needed_is_enabled(self, mock_is_needed):
++        mock_is_needed.return_value = False
++        self.mock_conf.is_enabled_auto_tie_breaker.return_value = True
++        self.assertFalse(lib_sbd.atb_has_to_be_enabled(
++            self.mock_runner, self.mock_conf, 2
++        ))
++        mock_is_needed.assert_called_once_with(
++            self.mock_runner, self.mock_conf, 2
++        )
++
++    def test_atb_not_needed_is_disabled(self, mock_is_needed):
++        mock_is_needed.return_value = False
++        self.mock_conf.is_enabled_auto_tie_breaker.return_value = False
++        self.assertFalse(lib_sbd.atb_has_to_be_enabled(
++            self.mock_runner, self.mock_conf, -2
++        ))
++        mock_is_needed.assert_called_once_with(
++            self.mock_runner, self.mock_conf, -2
++        )
++
++
++
+ class CheckSbdTest(TestCase):
+     def test_success(self):
+         mock_communicator = mock.MagicMock(spec_set=NodeCommunicator)
+@@ -316,11 +557,11 @@ class SetSbdConfigOnNodeTest(TestCase):
+         }
+         cfg_out = """# This file has been generated by pcs.
+ SBD_OPTS="-n node1"
+-SBD_WATCHDOG_DEV=/dev/watchdog
++SBD_WATCHDOG_DEV=/my/watchdog
+ SBD_WATCHDOG_TIMEOUT=0
+ """
+         lib_sbd.set_sbd_config_on_node(
+-            self.mock_rep, self.mock_com, self.node, cfg_in
++            self.mock_rep, self.mock_com, self.node, cfg_in, "/my/watchdog"
+         )
+         mock_set_sbd_cfg.assert_called_once_with(
+             self.mock_com, self.node, cfg_out
+@@ -340,17 +581,24 @@ class SetSbdConfigOnAllNodesTest(TestCase):
+     def test_success(self, mock_func):
+         mock_com = mock.MagicMock(spec_set=NodeCommunicator)
+         mock_rep = MockLibraryReportProcessor()
+-        node_list = [NodeAddresses("node" + str(i)) for i in range(5)]
++        watchdog_dict = dict([
++            (NodeAddresses("node" + str(i)), "/dev/watchdog" + str(i))
++            for i in range(5)
++        ])
++        node_list = list(watchdog_dict.keys())
+         config = {
+             "opt1": "val1",
+             "opt2": "val2"
+         }
+         lib_sbd.set_sbd_config_on_all_nodes(
+-            mock_rep, mock_com, node_list, config
++            mock_rep, mock_com, node_list, config, watchdog_dict
+         )
+         mock_func.assert_called_once_with(
+             lib_sbd.set_sbd_config_on_node,
+-            [([mock_rep, mock_com, node, config], {}) for node in node_list]
++            [
++                ([mock_rep, mock_com, node, config, watchdog_dict[node]], {})
++                for node in node_list
++            ]
+         )
+ 
+ 
+@@ -594,3 +842,17 @@ class IsSbdEnabledTest(TestCase):
+         mock_obj = mock.MagicMock()
+         mock_is_service_enabled.return_value = True
+         self.assertTrue(lib_sbd.is_sbd_enabled(mock_obj))
++
++
++@mock.patch("pcs.lib.external.is_service_installed")
++class IsSbdInstalledTest(TestCase):
++    def test_installed(self, mock_is_service_installed):
++        mock_obj = mock.MagicMock()
++        mock_is_service_installed.return_value = True
++        self.assertTrue(lib_sbd.is_sbd_installed(mock_obj))
++
++    def test_not_installed(self, mock_is_service_installed):
++        mock_obj = mock.MagicMock()
++        mock_is_service_installed.return_value = False
++        self.assertFalse(lib_sbd.is_sbd_installed(mock_obj))
++
+diff --git a/pcs/usage.py b/pcs/usage.py
+index b11a5fa..9ebbca9 100644
+--- a/pcs/usage.py
++++ b/pcs/usage.py
+@@ -683,6 +683,7 @@ Commands:
+         the whole CIB or be warned in the case of outdated CIB.
+ 
+     node add <node[,node-altaddr]> [--start [--wait[=<n>]]] [--enable]
++            [--watchdog=<watchdog-path>]
+         Add the node to corosync.conf and corosync on all nodes in the cluster
+         and sync the new corosync.conf to the new node.  If --start is
+         specified also start corosync/pacemaker on the new node, if --wait is
+@@ -690,6 +691,8 @@ Commands:
+         is specified enable corosync/pacemaker on new node.
+         When using Redundant Ring Protocol (RRP) with udpu transport, specify
+         the ring 0 address first followed by a ',' and then the ring 1 address.
++        Use --watchdog to specify path to watchdog on newly added node, when SBD
++        is enabled in cluster.
+ 
+     node remove <node>
+         Shutdown specified node and remove it from pacemaker and corosync on
+diff --git a/pcs/utils.py b/pcs/utils.py
+index 53cc0b0..a7ff7ca 100644
+--- a/pcs/utils.py
++++ b/pcs/utils.py
+@@ -32,7 +32,7 @@ from pcs.cli.common.reports import (
+     LibraryReportProcessorToConsole as LibraryReportProcessorToConsole,
+ )
+ from pcs.common.tools import simple_cache
+-from pcs.lib import reports
++from pcs.lib import reports, sbd
+ from pcs.lib.env import LibraryEnvironment
+ from pcs.lib.errors import LibraryError
+ from pcs.lib.external import (
+@@ -574,6 +574,23 @@ def getCorosyncActiveNodes():
+ 
+     return nodes_active
+ 
++
++def _enable_auto_tie_breaker_for_sbd(corosync_conf):
++    """
++    Enable auto tie breaker in specified corosync conf if it is needed by SBD.
++
++    corosync_conf -- parsed corosync conf
++    """
++    try:
++        corosync_facade = corosync_conf_facade(corosync_conf)
++        if sbd.atb_has_to_be_enabled(cmd_runner(), corosync_facade):
++            corosync_facade.set_quorum_options(
++                get_report_processor(), {"auto_tie_breaker": "1"}
++            )
++    except LibraryError as e:
++        process_library_reports(e.args)
++
++
+ # Add node specified to corosync.conf and reload corosync.conf (if running)
+ def addNodeToCorosync(node):
+ # Before adding, make sure node isn't already in corosync.conf
+@@ -600,6 +617,9 @@ def addNodeToCorosync(node):
+         new_node.add_attribute("ring1_addr", node1)
+     new_node.add_attribute("nodeid", new_nodeid)
+ 
++    # enable ATB if it's needed
++    _enable_auto_tie_breaker_for_sbd(corosync_conf)
++
+     corosync_conf = autoset_2node_corosync(corosync_conf)
+     setCorosyncConf(str(corosync_conf))
+     return True
+@@ -667,6 +687,9 @@ def removeNodeFromCorosync(node):
+                     removed_node = True
+ 
+     if removed_node:
++        # enable ATB if it's needed
++        _enable_auto_tie_breaker_for_sbd(corosync_conf)
++
+         corosync_conf = autoset_2node_corosync(corosync_conf)
+         setCorosyncConf(str(corosync_conf))
+ 
+diff --git a/pcsd/pcs.rb b/pcsd/pcs.rb
+index d46cd62..137bb3d 100644
+--- a/pcsd/pcs.rb
++++ b/pcsd/pcs.rb
+@@ -1995,14 +1995,14 @@ def enable_service(service)
+ end
+ 
+ def disable_service(service)
++  # fails when the service is not installed, so we need to check it beforehand
++  if not is_service_installed?(service)
++    return true
++  end
++
+   if ISSYSTEMCTL
+-    # returns success even if the service is not installed
+     cmd = ['systemctl', 'disable', "#{service}.service"]
+   else
+-    if not is_service_installed?(service)
+-      return true
+-    end
+-    # fails when the service is not installed, so we need to check it beforehand
+     cmd = ['chkconfig', service, 'off']
+   end
+   _, _, retcode = run_cmd(PCSAuth.getSuperuserAuth(), *cmd)
+-- 
+1.8.3.1
+

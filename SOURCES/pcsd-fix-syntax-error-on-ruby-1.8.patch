@@ -1,0 +1,25 @@
+From 96885f66dde45fd8edf2b916ce63bbc236cfe28a Mon Sep 17 00:00:00 2001
+From: Tomas Jelinek <tojeline@redhat.com>
+Date: Mon, 18 Jul 2016 15:03:42 +0200
+Subject: [PATCH] pcsd: fix syntax error on ruby 1.8
+
+---
+ pcsd/remote.rb | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/pcsd/remote.rb b/pcsd/remote.rb
+index 6a3a692..25fb74d 100644
+--- a/pcsd/remote.rb
++++ b/pcsd/remote.rb
+@@ -1558,7 +1558,7 @@ def remove_resource(params, request, auth_user)
+       end
+       cmd = [PCS, '-f', tmp_file.path, 'resource', 'disable']
+       resource_list.each { |resource|
+-        _, err, retval = run_cmd(user, *cmd, resource)
++        _, err, retval = run_cmd(user, *(cmd + [resource]))
+         if retval != 0
+           unless (
+             err.join('').index('unable to find a resource') != -1 and
+-- 
+1.8.3.1
+

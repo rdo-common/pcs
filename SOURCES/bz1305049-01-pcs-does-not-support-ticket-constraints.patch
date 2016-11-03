@@ -1,0 +1,351 @@
+From be8876832da345e7e16827bd6c50e262380d6979 Mon Sep 17 00:00:00 2001
+From: Ivan Devat <idevat@redhat.com>
+Date: Wed, 14 Sep 2016 09:04:57 +0200
+Subject: [PATCH] squash bz1305049 pcs does not support "ticket" con
+
+d147ba4a51d0 do not use suffix "no-role" in ticket constraints
+
+066cf217ec45 add constraint ticket remove command
+---
+ pcs/cli/common/lib_wrapper.py                  |  1 +
+ pcs/cli/constraint_ticket/command.py           |  6 ++
+ pcs/cli/constraint_ticket/test/test_command.py | 22 +++++++
+ pcs/constraint.py                              |  1 +
+ pcs/lib/cib/constraint/ticket.py               | 29 ++++++++-
+ pcs/lib/cib/test/test_constraint_ticket.py     | 89 +++++++++++++++++++++++++-
+ pcs/lib/commands/constraint/ticket.py          | 12 ++++
+ pcs/pcs.8                                      |  3 +
+ pcs/test/test_constraints.py                   | 36 +++++++++++
+ pcs/usage.py                                   |  3 +
+ 10 files changed, 199 insertions(+), 3 deletions(-)
+
+diff --git a/pcs/cli/common/lib_wrapper.py b/pcs/cli/common/lib_wrapper.py
+index 94a1311..99bfe35 100644
+--- a/pcs/cli/common/lib_wrapper.py
++++ b/pcs/cli/common/lib_wrapper.py
+@@ -132,6 +132,7 @@ def load_module(env, middleware_factory, name):
+                 'set': constraint_ticket.create_with_set,
+                 'show': constraint_ticket.show,
+                 'add': constraint_ticket.create,
++                'remove': constraint_ticket.remove,
+             }
+         )
+ 
+diff --git a/pcs/cli/constraint_ticket/command.py b/pcs/cli/constraint_ticket/command.py
+index ab70434..0ed4fdd 100644
+--- a/pcs/cli/constraint_ticket/command.py
++++ b/pcs/cli/constraint_ticket/command.py
+@@ -52,6 +52,12 @@ def add(lib, argv, modificators):
+         duplication_alowed=modificators["force"],
+     )
+ 
++def remove(lib, argv, modificators):
++    if len(argv) != 2:
++        raise CmdLineInputError()
++    ticket, resource_id = argv
++    lib.constraint_ticket.remove(ticket, resource_id)
++
+ def show(lib, argv, modificators):
+     """
+     show all ticket constraints
+diff --git a/pcs/cli/constraint_ticket/test/test_command.py b/pcs/cli/constraint_ticket/test/test_command.py
+index d40d421..9ca7817 100644
+--- a/pcs/cli/constraint_ticket/test/test_command.py
++++ b/pcs/cli/constraint_ticket/test/test_command.py
+@@ -65,3 +65,25 @@ class AddTest(TestCase):
+             resource_in_clone_alowed=True,
+             duplication_alowed=True,
+         )
++
++class RemoveTest(TestCase):
++    def test_refuse_args_count(self):
++        self.assertRaises(CmdLineInputError, lambda: command.remove(
++            mock.MagicMock(),
++            ["TICKET"],
++            {},
++        ))
++        self.assertRaises(CmdLineInputError, lambda: command.remove(
++            mock.MagicMock(),
++            ["TICKET", "RESOURCE", "SOMETHING_ELSE"],
++            {},
++        ))
++
++    def test_call_library_remove_with_correct_attrs(self):
++        lib = mock.MagicMock(
++            constraint_ticket=mock.MagicMock(remove=mock.Mock())
++        )
++        command.remove(lib, ["TICKET", "RESOURCE"], {})
++        lib.constraint_ticket.remove.assert_called_once_with(
++            "TICKET", "RESOURCE",
++        )
+diff --git a/pcs/constraint.py b/pcs/constraint.py
+index e32f1a3..d8415b6 100644
+--- a/pcs/constraint.py
++++ b/pcs/constraint.py
+@@ -90,6 +90,7 @@ def constraint_cmd(argv):
+             command_map = {
+                 "set": ticket_command.create_with_set,
+                 "add": ticket_command.add,
++                "remove": ticket_command.remove,
+                 "show": ticket_command.show,
+             }
+             sub_command = argv[0] if argv else "show"
+diff --git a/pcs/lib/cib/constraint/ticket.py b/pcs/lib/cib/constraint/ticket.py
+index 4154aac..c708794 100644
+--- a/pcs/lib/cib/constraint/ticket.py
++++ b/pcs/lib/cib/constraint/ticket.py
+@@ -39,7 +39,8 @@ def _validate_options_common(options):
+ def _create_id(cib, ticket, resource_id, resource_role):
+     return tools.find_unique_id(
+         cib,
+-        "-".join(('ticket', ticket, resource_id, resource_role))
++        "-".join(('ticket', ticket, resource_id))
++        +("-{0}".format(resource_role) if resource_role else "")
+     )
+ 
+ def prepare_options_with_set(cib, options, resource_set_list):
+@@ -93,7 +94,7 @@ def prepare_options_plain(cib, options, ticket, resource_id):
+             cib,
+             options["ticket"],
+             resource_id,
+-            options["rsc-role"] if "rsc-role" in options else "no-role"
++            options.get("rsc-role", "")
+         ),
+         partial(tools.check_new_id_applicable, cib, DESCRIPTION)
+     )
+@@ -103,6 +104,30 @@ def create_plain(constraint_section, options):
+     element.attrib.update(options)
+     return element
+ 
++def remove_plain(constraint_section, ticket_key, resource_id):
++    ticket_element_list = constraint_section.xpath(
++        './/rsc_ticket[@ticket="{0}" and @rsc="{1}"]'
++        .format(ticket_key, resource_id)
++    )
++
++    for ticket_element in ticket_element_list:
++        ticket_element.getparent().remove(ticket_element)
++
++def remove_with_resource_set(constraint_section, ticket_key, resource_id):
++    ref_element_list = constraint_section.xpath(
++        './/rsc_ticket[@ticket="{0}"]/resource_set/resource_ref[@id="{1}"]'
++        .format(ticket_key, resource_id)
++    )
++
++    for ref_element in ref_element_list:
++        set_element = ref_element.getparent()
++        set_element.remove(ref_element)
++        if not len(set_element):
++            ticket_element = set_element.getparent()
++            ticket_element.remove(set_element)
++            if not len(ticket_element):
++                ticket_element.getparent().remove(ticket_element)
++
+ def are_duplicate_plain(element, other_element):
+     return all(
+         element.attrib.get(name, "") == other_element.attrib.get(name, "")
+diff --git a/pcs/lib/cib/test/test_constraint_ticket.py b/pcs/lib/cib/test/test_constraint_ticket.py
+index ede748e..d3da004 100644
+--- a/pcs/lib/cib/test/test_constraint_ticket.py
++++ b/pcs/lib/cib/test/test_constraint_ticket.py
+@@ -8,10 +8,15 @@ from __future__ import (
+ from functools import partial
+ from pcs.test.tools.pcs_unittest import TestCase
+ 
++from lxml import etree
++
+ from pcs.common import report_codes
+ from pcs.lib.cib.constraint import ticket
+ from pcs.lib.errors import ReportItemSeverity as severities
+-from pcs.test.tools.assertions import assert_raise_library_error
++from pcs.test.tools.assertions import (
++    assert_raise_library_error,
++    assert_xml_equal,
++)
+ from pcs.test.tools.pcs_unittest import mock
+ 
+ 
+@@ -306,3 +311,85 @@ class AreDuplicateWithResourceSet(TestCase):
+             Element({"ticket": "ticket_key"}),
+             Element({"ticket": "X"}),
+         ))
++
++class RemovePlainTest(TestCase):
++    def test_remove_tickets_constraints_for_resource(self):
++        constraint_section = etree.fromstring("""
++            <constraints>
++                <rsc_ticket id="t1" ticket="tA" rsc="rA"/>
++                <rsc_ticket id="t2" ticket="tA" rsc="rB"/>
++                <rsc_ticket id="t3" ticket="tA" rsc="rA"/>
++                <rsc_ticket id="t4" ticket="tB" rsc="rA"/>
++                <rsc_ticket id="t5" ticket="tB" rsc="rB"/>
++            </constraints>
++        """)
++
++        ticket.remove_plain(
++            constraint_section,
++            ticket_key="tA",
++            resource_id="rA",
++        )
++
++        assert_xml_equal(etree.tostring(constraint_section).decode(), """
++            <constraints>
++                <rsc_ticket id="t2" ticket="tA" rsc="rB"/>
++                <rsc_ticket id="t4" ticket="tB" rsc="rA"/>
++                <rsc_ticket id="t5" ticket="tB" rsc="rB"/>
++            </constraints>
++        """)
++
++class RemoveWithSetTest(TestCase):
++    def test_remove_resource_references_and_empty_remaining_parents(self):
++        constraint_section = etree.fromstring("""
++            <constraints>
++                <rsc_ticket id="t1" ticket="tA">
++                    <resource_set id="rs1">
++                        <resource_ref id="rA"/>
++                    </resource_set>
++                    <resource_set id="rs2">
++                        <resource_ref id="rA"/>
++                    </resource_set>
++                </rsc_ticket>
++
++                <rsc_ticket id="t2" ticket="tA">
++                    <resource_set id="rs3">
++                        <resource_ref id="rA"/>
++                        <resource_ref id="rB"/>
++                    </resource_set>
++                    <resource_set id="rs4">
++                        <resource_ref id="rA"/>
++                    </resource_set>
++                </rsc_ticket>
++
++                <rsc_ticket id="t3" ticket="tB">
++                    <resource_set id="rs5">
++                        <resource_ref id="rA"/>
++                    </resource_set>
++                </rsc_ticket>
++            </constraints>
++        """)
++
++        ticket.remove_with_resource_set(
++            constraint_section,
++            ticket_key="tA",
++            resource_id="rA"
++        )
++
++        assert_xml_equal(
++            """
++                <constraints>
++                    <rsc_ticket id="t2" ticket="tA">
++                        <resource_set id="rs3">
++                            <resource_ref id="rB"/>
++                        </resource_set>
++                    </rsc_ticket>
++
++                    <rsc_ticket id="t3" ticket="tB">
++                        <resource_set id="rs5">
++                            <resource_ref id="rA"/>
++                        </resource_set>
++                    </rsc_ticket>
++                </constraints>
++            """,
++            etree.tostring(constraint_section).decode()
++        )
+diff --git a/pcs/lib/commands/constraint/ticket.py b/pcs/lib/commands/constraint/ticket.py
+index e6960d5..2ea7afc 100644
+--- a/pcs/lib/commands/constraint/ticket.py
++++ b/pcs/lib/commands/constraint/ticket.py
+@@ -68,3 +68,15 @@ def create(
+     )
+ 
+     env.push_cib(cib)
++
++def remove(env, ticket_key, resource_id):
++    """
++    remove all ticket constraint from resource
++    If resource is in resource set with another resources then only resource ref
++    is removed. If resource is alone in resource set whole constraint is removed.
++    """
++    cib = env.get_cib()
++    constraint_section = get_constraints(cib)
++    ticket.remove_plain(constraint_section, ticket_key, resource_id)
++    ticket.remove_with_resource_set(constraint_section, ticket_key, resource_id)
++    env.push_cib(cib)
+diff --git a/pcs/pcs.8 b/pcs/pcs.8
+index 61abe67..40b146f 100644
+--- a/pcs/pcs.8
++++ b/pcs/pcs.8
+@@ -490,6 +490,9 @@ Create a ticket constraint for <resource id>. Available option is loss-policy=fe
+ ticket set <resource1> [resourceN]... [options] [set <resourceX> ... [options]] [setoptions [constraint_options]]
+ Create a ticket constraint with a resource set. Available options are sequential=true/false, require-all=true/false, action=start/promote/demote/stop and role=Stopped/Started/Master/Slave. Required constraint option is ticket=<ticket>. Optional constraint options are id=<constraint-id> and loss-policy=fence/stop/freeze/demote.
+ .TP
++ticket remove <ticket> <resource id>
++Remove all ticket constraints with <ticket> from <resource id>.
++.TP
+ remove [constraint id]...
+ Remove constraint(s) or constraint rules with the specified id(s).
+ .TP
+diff --git a/pcs/test/test_constraints.py b/pcs/test/test_constraints.py
+index 7c76e09..4007e90 100644
+--- a/pcs/test/test_constraints.py
++++ b/pcs/test/test_constraints.py
+@@ -2686,6 +2686,42 @@ class TicketAdd(ConstraintBaseTest):
+             "  Master A loss-policy=fence ticket=T",
+         ])
+ 
++class TicketRemoveTest(ConstraintBaseTest):
++    def test_remove_multiple_tickets(self):
++        #fixture
++        self.assert_pcs_success('constraint ticket add T A')
++        self.assert_pcs_success(
++            'constraint ticket add T A --force',
++            stdout_full=[
++                "Warning: duplicate constraint already exists",
++                "  A ticket=T (id:ticket-T-A)"
++            ]
++        )
++        self.assert_pcs_success(
++            'constraint ticket set A B setoptions ticket=T'
++        )
++        self.assert_pcs_success(
++            'constraint ticket set A setoptions ticket=T'
++        )
++        self.assert_pcs_success("constraint ticket show", stdout_full=[
++            "Ticket Constraints:",
++            "  A ticket=T",
++            "  A ticket=T",
++            "  Resource Sets:",
++            "    set A B setoptions ticket=T",
++            "    set A setoptions ticket=T",
++        ])
++
++        #test
++        self.assert_pcs_success("constraint ticket remove T A")
++
++        self.assert_pcs_success("constraint ticket show", stdout_full=[
++            "Ticket Constraints:",
++            "  Resource Sets:",
++            "    set B setoptions ticket=T",
++        ])
++
++
+ class TicketShow(ConstraintBaseTest):
+     def test_show_set(self):
+         self.assert_pcs_success('constraint ticket set A B setoptions ticket=T')
+diff --git a/pcs/usage.py b/pcs/usage.py
+index 9d4617f..764e3fc 100644
+--- a/pcs/usage.py
++++ b/pcs/usage.py
+@@ -1011,6 +1011,9 @@ Commands:
+         Required constraint option is ticket=<ticket>. Optional constraint
+         options are id=<constraint-id> and loss-policy=fence/stop/freeze/demote.
+ 
++    ticket remove <ticket> <resource id>
++        Remove all ticket constraints with <ticket> from <resource id>.
++
+     remove [constraint id]...
+         Remove constraint(s) or constraint rules with the specified id(s).
+ 
+-- 
+1.8.3.1
+

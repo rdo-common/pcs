@@ -1,0 +1,28 @@
+From c4e916c7ae9f5bb040d8268f93d5949e1cd078f8 Mon Sep 17 00:00:00 2001
+From: Tomas Jelinek <tojeline@redhat.com>
+Date: Tue, 26 Jul 2016 10:17:34 +0200
+Subject: [PATCH] test: fix an occasional multithread test fail
+
+---
+ pcs/test/test_utils.py | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/pcs/test/test_utils.py b/pcs/test/test_utils.py
+index 192048e..43145fd 100644
+--- a/pcs/test/test_utils.py
++++ b/pcs/test/test_utils.py
+@@ -1806,7 +1806,10 @@ class RunParallelTest(unittest.TestCase):
+             wait_seconds=.1
+         )
+ 
+-        self.assertEqual(log, ['first', 'second'])
++        self.assertEqual(
++            sorted(log),
++            sorted(['first', 'second'])
++        )
+ 
+     def test_wait_for_slower_workers(self):
+         log = []
+-- 
+1.8.3.1
+

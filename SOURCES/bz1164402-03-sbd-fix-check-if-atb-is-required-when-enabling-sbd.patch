@@ -1,0 +1,354 @@
+From 66b5e393aebd84b08047f33d09bc4cbce730e205 Mon Sep 17 00:00:00 2001
+From: Ondrej Mular <omular@redhat.com>
+Date: Tue, 23 Aug 2016 11:19:20 +0200
+Subject: [PATCH] sbd: fix check if ATB is required when enabling sbd
+
+---
+ pcs/common/report_codes.py |   1 +
+ pcs/lib/commands/sbd.py    |   3 +-
+ pcs/lib/reports.py         |  12 +++
+ pcs/lib/sbd.py             |  39 ++++++++-
+ pcs/test/test_lib_sbd.py   | 193 +++++++--------------------------------------
+ 5 files changed, 80 insertions(+), 168 deletions(-)
+
+diff --git a/pcs/common/report_codes.py b/pcs/common/report_codes.py
+index 5e46a1f..e6a86ec 100644
+--- a/pcs/common/report_codes.py
++++ b/pcs/common/report_codes.py
+@@ -155,6 +155,7 @@ SBD_DISABLING_STARTED = "SBD_DISABLING_STARTED"
+ SBD_ENABLING_STARTED = "SBD_ENABLING_STARTED"
+ SBD_NOT_INSTALLED = "SBD_NOT_INSTALLED"
+ SBD_NOT_ENABLED = "SBD_NOT_ENABLED"
++SBD_REQUIRES_ATB = "SBD_REQUIRES_ATB"
+ SERVICE_DISABLE_ERROR = "SERVICE_DISABLE_ERROR"
+ SERVICE_DISABLE_STARTED = "SERVICE_DISABLE_STARTED"
+ SERVICE_DISABLE_SUCCESS = "SERVICE_DISABLE_SUCCESS"
+diff --git a/pcs/lib/commands/sbd.py b/pcs/lib/commands/sbd.py
+index 265ebb5..2acb104 100644
+--- a/pcs/lib/commands/sbd.py
++++ b/pcs/lib/commands/sbd.py
+@@ -159,7 +159,8 @@ def enable_sbd(
+ 
+     # enable ATB if needed
+     corosync_conf = lib_env.get_corosync_conf()
+-    if sbd.atb_has_to_be_enabled(lib_env.cmd_runner(), corosync_conf):
++    if sbd.atb_has_to_be_enabled_pre_enable_check(corosync_conf):
++        lib_env.report_processor.process(reports.sbd_requires_atb())
+         corosync_conf.set_quorum_options(
+             lib_env.report_processor, {"auto_tie_breaker": "1"}
+         )
+diff --git a/pcs/lib/reports.py b/pcs/lib/reports.py
+index 568bb7e..a701679 100644
+--- a/pcs/lib/reports.py
++++ b/pcs/lib/reports.py
+@@ -1928,3 +1928,15 @@ def quorum_cannot_disable_atb_due_to_sbd(
+         "unable to disable auto_tie_breaker: SBD fencing will have no effect",
+         forceable=forceable
+     )
++
++
++def sbd_requires_atb():
++    """
++    Warning that ATB will be enabled in order to make SBD fencing effective.
++    """
++    return ReportItem.warning(
++        report_codes.SBD_REQUIRES_ATB,
++        "auto_tie_breaker quorum option will be enabled to make SBD fencing "
++        "effective. Cluster has to be offline to be able to make this change."
++    )
++
+diff --git a/pcs/lib/sbd.py b/pcs/lib/sbd.py
+index c9f013b..39de740 100644
+--- a/pcs/lib/sbd.py
++++ b/pcs/lib/sbd.py
+@@ -46,6 +46,25 @@ def _run_parallel_and_raise_lib_error_on_failure(func, param_list):
+         raise LibraryError(*report_list)
+ 
+ 
++def _even_number_of_nodes_and_no_qdevice(
++    corosync_conf_facade, node_number_modifier=0
++):
++    """
++    Returns True whenever cluster has no quorum device configured and number of
++    nodes + node_number_modifier is even number, False otherwise.
++
++    corosync_conf_facade --
++    node_number_modifier -- this value will be added to current number of nodes.
++        This can be useful to test whenever is ATB needed when adding/removing
++        node.
++    """
++    return (
++        not corosync_conf_facade.has_quorum_device()
++        and
++        (len(corosync_conf_facade.get_nodes()) + node_number_modifier) % 2 == 0
++    )
++
++
+ def is_auto_tie_breaker_needed(
+     runner, corosync_conf_facade, node_number_modifier=0
+ ):
+@@ -60,15 +79,29 @@ def is_auto_tie_breaker_needed(
+         node.
+     """
+     return (
+-        not corosync_conf_facade.has_quorum_device()
+-        and
+-        (len(corosync_conf_facade.get_nodes()) + node_number_modifier) % 2 == 0
++        _even_number_of_nodes_and_no_qdevice(
++            corosync_conf_facade, node_number_modifier
++        )
+         and
+         is_sbd_installed(runner)
+         and
+         is_sbd_enabled(runner)
+     )
+ 
++
++def atb_has_to_be_enabled_pre_enable_check(corosync_conf_facade):
++    """
++    Returns True whenever quorum option auto_tie_breaker is needed to be enabled
++    for proper working of SBD fencing. False if it is not needed. This function
++    doesn't check if sbd is installed nor enabled.
++     """
++    return (
++        not corosync_conf_facade.is_enabled_auto_tie_breaker()
++        and
++        _even_number_of_nodes_and_no_qdevice(corosync_conf_facade)
++    )
++
++
+ def atb_has_to_be_enabled(runner, corosync_conf_facade, node_number_modifier=0):
+     """
+     Return True whenever quorum option auto tie breaker has to be enabled for
+diff --git a/pcs/test/test_lib_sbd.py b/pcs/test/test_lib_sbd.py
+index fd29484..516e0bd 100644
+--- a/pcs/test/test_lib_sbd.py
++++ b/pcs/test/test_lib_sbd.py
+@@ -86,195 +86,60 @@ class RunParallelAndRaiseLibErrorOnFailureTest(TestCase):
+         )
+ 
+ 
+-@mock.patch("pcs.lib.sbd.is_sbd_installed")
+-@mock.patch("pcs.lib.sbd.is_sbd_enabled")
+-class IsAutoTieBreakerNeededTest(TestCase):
++class EvenNumberOfNodesAndNoQdevice(TestCase):
+     def setUp(self):
+-        self.runner = "runner"
+         self.mock_corosync_conf = mock.MagicMock(spec_set=CorosyncConfigFacade)
+ 
+     def _set_ret_vals(self, nodes, qdevice):
+         self.mock_corosync_conf.get_nodes.return_value = nodes
+         self.mock_corosync_conf.has_quorum_device.return_value = qdevice
+ 
+-    def test_sbd_enabled_even_nodes_has_qdevice(
+-        self, mock_enabled, mock_installed
+-    ):
+-        mock_enabled.return_value = True
+-        mock_installed.return_value = True
+-        self._set_ret_vals([1, 2], True)
+-        self.assertFalse(lib_sbd.is_auto_tie_breaker_needed(
+-            self.runner, self.mock_corosync_conf
+-        ))
+-
+-    def test_sbd_enabled_even_nodes_no_qdevice(
+-        self, mock_enabled, mock_installed
+-    ):
+-        mock_enabled.return_value = True
+-        mock_installed.return_value = True
+-        self._set_ret_vals([1, 2], False)
+-        self.assertTrue(lib_sbd.is_auto_tie_breaker_needed(
+-            self.runner, self.mock_corosync_conf
+-        ))
+-
+-    def test_sbd_not_installed_even_nodes_no_qdevice(
+-        self, mock_enabled, mock_installed
+-    ):
+-        mock_enabled.return_value = False
+-        mock_installed.return_value = False
++    def test_even_num_no_qdevice(self):
+         self._set_ret_vals([1, 2], False)
+-        self.assertFalse(lib_sbd.is_auto_tie_breaker_needed(
+-            self.runner, self.mock_corosync_conf
+-        ))
+-
+-    def test_sbd_enabled_odd_nodes_has_qdevice(
+-        self, mock_enabled, mock_installed
+-    ):
+-        mock_enabled.return_value = True
+-        mock_installed.return_value = True
+-        self._set_ret_vals([1, 2, 3], True)
+-        self.assertFalse(lib_sbd.is_auto_tie_breaker_needed(
+-            self.runner, self.mock_corosync_conf
+-        ))
+-
+-    def test_sbd_enabled_odd_nodes_no_qdevice(
+-        self, mock_enabled, mock_installed
+-    ):
+-        mock_enabled.return_value = True
+-        mock_installed.return_value = True
+-        self._set_ret_vals([1, 2, 3], False)
+-        self.assertFalse(lib_sbd.is_auto_tie_breaker_needed(
+-            self.runner, self.mock_corosync_conf
++        self.assertTrue(lib_sbd._even_number_of_nodes_and_no_qdevice(
++            self.mock_corosync_conf
+         ))
+ 
+-    def test_sbd_disabled_even_nodes_has_qdevice(
+-        self, mock_enabled, mock_installed
+-    ):
+-        mock_enabled.return_value = False
+-        mock_installed.return_value = True
++    def test_even_num_qdevice(self):
+         self._set_ret_vals([1, 2], True)
+-        self.assertFalse(lib_sbd.is_auto_tie_breaker_needed(
+-            self.runner, self.mock_corosync_conf
+-        ))
+-
+-    def test_sbd_disabled_even_nodes_no_qdevice(
+-        self, mock_enabled, mock_installed
+-    ):
+-        mock_enabled.return_value = False
+-        mock_installed.return_value = True
+-        self._set_ret_vals([1, 2], False)
+-        self.assertFalse(lib_sbd.is_auto_tie_breaker_needed(
+-            self.runner, self.mock_corosync_conf
++        self.assertFalse(lib_sbd._even_number_of_nodes_and_no_qdevice(
++            self.mock_corosync_conf
+         ))
+ 
+-    def test_sbd_disabled_odd_nodes_has_qdevice(
+-        self, mock_enabled, mock_installed
+-    ):
+-        mock_enabled.return_value = False
+-        mock_installed.return_value = True
+-        self._set_ret_vals([1, 2, 3], True)
+-        self.assertFalse(lib_sbd.is_auto_tie_breaker_needed(
+-            self.runner, self.mock_corosync_conf
+-        ))
+-
+-    def test_sbd_disabled_odd_nodes_no_qdevice(
+-        self, mock_enabled, mock_installed
+-    ):
+-        mock_enabled.return_value = False
+-        mock_installed.return_value = True
++    def test_odd_num_no_qdevice(self):
+         self._set_ret_vals([1, 2, 3], False)
+-        self.assertFalse(lib_sbd.is_auto_tie_breaker_needed(
+-            self.runner, self.mock_corosync_conf
++        self.assertFalse(lib_sbd._even_number_of_nodes_and_no_qdevice(
++            self.mock_corosync_conf
+         ))
+ 
+-    def test_sbd_enabled_odd_nodes_no_qdevice_plus_node(
+-        self, mock_enabled, mock_installed
+-    ):
+-        mock_enabled.return_value = True
+-        mock_installed.return_value = True
+-        self._set_ret_vals([1, 2, 3], False)
+-        self.assertTrue(lib_sbd.is_auto_tie_breaker_needed(
+-            self.runner, self.mock_corosync_conf, 1
+-        ))
+-
+-    def test_sbd_not_installed_odd_nodes_no_qdevice_plus_node(
+-        self, mock_enabled, mock_installed
+-    ):
+-        mock_enabled.return_value = False
+-        mock_installed.return_value = False
+-        self._set_ret_vals([1, 2, 3], False)
+-        self.assertFalse(lib_sbd.is_auto_tie_breaker_needed(
+-            self.runner, self.mock_corosync_conf, 1
+-        ))
+-
+-    def test_sbd_enabled_odd_nodes_no_qdevice_minus_node(
+-        self, mock_enabled, mock_installed
+-    ):
+-        mock_enabled.return_value = True
+-        mock_installed.return_value = True
+-        self._set_ret_vals([1, 2, 3], False)
+-        self.assertTrue(lib_sbd.is_auto_tie_breaker_needed(
+-            self.runner, self.mock_corosync_conf, -1
+-        ))
+-
+-    def test_sbd_enabled_odd_nodes_no_qdevice_plus_2_nodes(
+-        self, mock_enabled, mock_installed
+-    ):
+-        mock_enabled.return_value = True
+-        mock_installed.return_value = True
+-        self._set_ret_vals([1, 2, 3], False)
+-        self.assertFalse(lib_sbd.is_auto_tie_breaker_needed(
+-            self.runner, self.mock_corosync_conf, 2
+-        ))
+-
+-    def test_sbd_enabled_odd_nodes_no_qdevice_minus_2_nodes(
+-        self, mock_enabled, mock_installed
+-    ):
+-        mock_enabled.return_value = True
+-        mock_installed.return_value = True
+-        self._set_ret_vals([1, 2, 3], False)
+-        self.assertFalse(lib_sbd.is_auto_tie_breaker_needed(
+-            self.runner, self.mock_corosync_conf, -2
++    def test_odd_num_qdevice(self):
++        self._set_ret_vals([1, 2, 3], True)
++        self.assertFalse(lib_sbd._even_number_of_nodes_and_no_qdevice(
++            self.mock_corosync_conf
+         ))
+ 
+-    def test_sbd_enabled_even_nodes_no_qdevice_plus_node(
+-        self, mock_enabled, mock_installed
+-    ):
+-        mock_enabled.return_value = True
+-        mock_installed.return_value = True
++    def test_even_num_no_qdevice_plus_one(self):
+         self._set_ret_vals([1, 2], False)
+-        self.assertFalse(lib_sbd.is_auto_tie_breaker_needed(
+-            self.runner, self.mock_corosync_conf, 1
++        self.assertFalse(lib_sbd._even_number_of_nodes_and_no_qdevice(
++            self.mock_corosync_conf, 1
+         ))
+ 
+-    def test_sbd_enabled_even_nodes_no_qdevice_minus_node(
+-        self, mock_enabled, mock_installed
+-    ):
+-        mock_enabled.return_value = True
+-        mock_installed.return_value = True
+-        self._set_ret_vals([1, 2], False)
+-        self.assertFalse(lib_sbd.is_auto_tie_breaker_needed(
+-            self.runner, self.mock_corosync_conf, -1
++    def test_even_num_qdevice_plus_one(self):
++        self._set_ret_vals([1, 2], True)
++        self.assertFalse(lib_sbd._even_number_of_nodes_and_no_qdevice(
++            self.mock_corosync_conf, 1
+         ))
+ 
+-    def test_sbd_enabled_even_nodes_no_qdevice_plus_2_nodes(
+-        self, mock_enabled, mock_installed
+-    ):
+-        mock_enabled.return_value = True
+-        mock_installed.return_value = True
+-        self._set_ret_vals([1, 2], False)
+-        self.assertTrue(lib_sbd.is_auto_tie_breaker_needed(
+-            self.runner, self.mock_corosync_conf, 2
++    def test_odd_num_no_qdevice_plus_one(self):
++        self._set_ret_vals([1, 2, 3], False)
++        self.assertTrue(lib_sbd._even_number_of_nodes_and_no_qdevice(
++            self.mock_corosync_conf, 1
+         ))
+ 
+-    def test_sbd_enabled_even_nodes_no_qdevice_minus_2_nodes(
+-        self, mock_enabled, mock_installed
+-    ):
+-        mock_enabled.return_value = True
+-        mock_installed.return_value = True
+-        self._set_ret_vals([1, 2, 3, 4], False)
+-        self.assertTrue(lib_sbd.is_auto_tie_breaker_needed(
+-            self.runner, self.mock_corosync_conf, -2
++    def test_odd_num_qdevice_plus_one(self):
++        self._set_ret_vals([1, 2, 3], True)
++        self.assertFalse(lib_sbd._even_number_of_nodes_and_no_qdevice(
++            self.mock_corosync_conf, 1
+         ))
+ 
+ 
+-- 
+1.8.3.1
+

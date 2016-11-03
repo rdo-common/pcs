@@ -1,0 +1,185 @@
+From 563a2c51877b9cf2a5ae419fc6d4eeb680eed04f Mon Sep 17 00:00:00 2001
+From: Ondrej Mular <omular@redhat.com>
+Date: Wed, 24 Aug 2016 10:04:01 +0200
+Subject: [PATCH] web UI: change way of displaying status of unmanaged
+ primitive resources
+
+---
+ pcsd/cluster_entity.rb        | 11 +----------
+ pcsd/public/js/nodes-ember.js | 27 ++++++++++++++++++++++-----
+ pcsd/public/js/pcsd.js        | 10 ++++++----
+ pcsd/views/manage.erb         | 15 ++++++++++-----
+ 4 files changed, 39 insertions(+), 24 deletions(-)
+
+diff --git a/pcsd/cluster_entity.rb b/pcsd/cluster_entity.rb
+index 7216626..4ffcd4b 100644
+--- a/pcsd/cluster_entity.rb
++++ b/pcsd/cluster_entity.rb
+@@ -333,10 +333,6 @@ module ClusterEntity
+         :val => 6,
+         :str => 'unknown'
+       },
+-      :unmanaged => {
+-        :val => 7,
+-        :str => 'unmanaged'
+-      },
+     }
+ 
+     def initialize(status=:unknown)
+@@ -536,11 +532,8 @@ module ClusterEntity
+     def get_status
+       running = 0
+       failed = 0
+-      unmanaged = 0
+       @crm_status.each do |s|
+-        if !s.managed
+-          unmanaged += 1
+-        elsif s.active
++        if s.active
+           running += 1
+         elsif s.failed
+           failed += 1
+@@ -549,8 +542,6 @@ module ClusterEntity
+ 
+       if disabled?
+         status = ClusterEntity::ResourceStatus.new(:disabled)
+-      elsif unmanaged >0
+-        status = ClusterEntity::ResourceStatus.new(:unmanaged)
+       elsif running > 0
+         status = ClusterEntity::ResourceStatus.new(:running)
+       elsif failed > 0 or @error_list.length > 0
+diff --git a/pcsd/public/js/nodes-ember.js b/pcsd/public/js/nodes-ember.js
+index f176c39..c650fe6 100644
+--- a/pcsd/public/js/nodes-ember.js
++++ b/pcsd/public/js/nodes-ember.js
+@@ -851,7 +851,9 @@ Pcs.ResourceObj = Ember.Object.extend({
+   }.property("class_type"),
+   res_type: Ember.computed.alias('resource_type'),
+   status_icon: function() {
+-    var icon_class = get_status_icon_class(this.get("status_val"));
++    var icon_class = get_status_icon_class(
++      this.get("status_val"), this.get("is_unmanaged")
++    );
+     return "<div style=\"float:left;margin-right:6px;height:16px;\" class=\"" + icon_class + " sprites\"></div>";
+   }.property("status_val"),
+   status_val: function() {
+@@ -867,19 +869,23 @@ Pcs.ResourceObj = Ember.Object.extend({
+     }
+   }.property('status', 'error_list.@each.message', 'warning_list.@each.message'),
+   status_color: function() {
+-    return get_status_color(this.get("status_val"));
++    return get_status_color(this.get("status_val"), this.get("is_unmanaged"));
+   }.property("status_val"),
+   status_style: function() {
+-    var color = get_status_color(this.get("status_val"));
++    var color = get_status_color(
++      this.get("status_val"), this.get("is_unmanaged")
++    );
+     return "color: " + color + ((color != "green")? "; font-weight: bold;" : "");
+   }.property("status_val"),
+   show_status: function() {
+-    return '<span style="' + this.get('status_style') + '">' + this.get('status') + '</span>';
++    return '<span style="' + this.get('status_style') + '">'
++      + this.get('status') + (this.get("is_unmanaged") ? " (unmanaged)" : "")
++      + '</span>';
+   }.property("status_style", "disabled"),
+   status_class: function() {
+     if (
+       this.get("status_val") == get_status_value("ok") ||
+-      ["disabled", "unmanaged"].indexOf(this.get("status")) != -1
++      this.get("status") == "disabled"
+     ) {
+       return (
+         Pcs.clusterController.get("show_all_resources") ? "" : "hidden "
+@@ -1003,6 +1009,17 @@ Pcs.PrimitiveObj = Pcs.ResourceObj.extend({
+   instance_status: [],
+   operations: [],
+   utilization: [],
++  is_unmanaged: function() {
++    var instance_status_list = this.get("instance_status");
++    if (!instance_status_list) {
++      return false;
++    }
++    var is_managed = true;
++    $.each(instance_status_list, function(_, instance_status) {
++      is_managed = is_managed && instance_status.get("managed");
++    });
++    return !is_managed;
++  }.property("instance_status.@each.managed"),
+   resource_type: function() {
+     var agent = this.get("agentname");
+     if (agent) {
+diff --git a/pcsd/public/js/pcsd.js b/pcsd/public/js/pcsd.js
+index 1060bd3..67a0bdb 100644
+--- a/pcsd/public/js/pcsd.js
++++ b/pcsd/public/js/pcsd.js
+@@ -1977,7 +1977,8 @@ function status_comparator(a,b) {
+   return valA - valB;
+ }
+ 
+-function get_status_icon_class(status_val) {
++function get_status_icon_class(status_val, is_unmanaged) {
++  var is_unmanaged = typeof is_unmanaged !== 'undefined' ? is_unmanaged : false;
+   switch (status_val) {
+     case get_status_value("error"):
+       return "error";
+@@ -1985,15 +1986,16 @@ function get_status_icon_class(status_val) {
+     case get_status_value("warning"):
+       return "warning";
+     case get_status_value("ok"):
+-      return "check";
++      return is_unmanaged ? "warning" : "check";
+     default:
+       return "x";
+   }
+ }
+ 
+-function get_status_color(status_val) {
++function get_status_color(status_val, is_unmanaged) {
++  var is_unmanaged = typeof is_unmanaged !== 'undefined' ? is_unmanaged : false;
+   if (status_val == get_status_value("ok")) {
+-    return "green";
++    return is_unmanaged? "orange" : "green";
+   }
+   else if (status_val == get_status_value("warning") || status_val == get_status_value("unknown") || status_val == get_status_value('disabled')) {
+     return "orange";
+diff --git a/pcsd/views/manage.erb b/pcsd/views/manage.erb
+index 885b327..39ab41f 100644
+--- a/pcsd/views/manage.erb
++++ b/pcsd/views/manage.erb
+@@ -113,13 +113,18 @@
+               <td>
+                 <table class="datatable">
+                   <tr>
+-                    <th style="width: 150px;">RESOURCE</th>
+-                    <th style="width: 100px;">STATUS</th>
++                    <th style="width: 170px;">RESOURCE</th>
++                    <th style="width: 150px;">STATUS</th>
+                   </tr>
+                   {{#each r in Pcs.clusterController.cur_cluster.resource_list}}
+                   <tr {{bind-attr title=r.tooltip}} {{bind-attr class=r.status_class}}>
+                     <td><a {{bind-attr href=r.url_link}}>{{r.id}}</a></td>
+-                    <td {{bind-attr style=r.status_style}}>{{{r.status_icon}}}{{r.status}}</td>
++                    <td {{bind-attr style=r.status_style}}>
++                      {{{r.status_icon}}}{{r.status}}
++                      {{#if r.is_unmanaged}}
++                        (unmanaged)
++                      {{/if}}
++                    </td>
+                   </tr>
+                   {{else}}
+                   <tr>
+@@ -144,8 +149,8 @@
+               <td>
+                 <table class="datatable">
+                   <tr>
+-                    <th style="width: 150px;">FENCE-DEVICE</th>
+-                    <th style="width: 100px;">STATUS</th>
++                    <th style="width: 170px;">FENCE-DEVICE</th>
++                    <th style="width: 150px;">STATUS</th>
+                   </tr>
+                   {{#each f in Pcs.clusterController.cur_cluster.fence_list}}
+                   <tr {{bind-attr title=f.tooltip}} {{bind-attr class=f.status_class_fence}}>
+-- 
+1.8.3.1
+

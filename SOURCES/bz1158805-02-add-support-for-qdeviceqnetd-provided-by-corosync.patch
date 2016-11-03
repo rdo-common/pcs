@@ -1,0 +1,4078 @@
+From bc599f0f30c039a72540002d9a41a93c15626837 Mon Sep 17 00:00:00 2001
+From: Ivan Devat <idevat@redhat.com>
+Date: Wed, 14 Sep 2016 09:04:57 +0200
+Subject: [PATCH] squash bz1158805 Add support for qdevice/qnetd pro
+
+9c7f37ef37bb lib: do not merge external processes' stdout and stderr
+
+db3ada5e27aa warn on stopping/destroying currently used qdevice
+
+18df73397b54 handle SBD when removing qdevice from a cluster
+
+766f86954b46 Allow to re-run "cluster node add" if failed due to qdevice
+---
+ pcs/cluster.py                               |  44 ++--
+ pcs/common/report_codes.py                   |   6 +-
+ pcs/common/tools.py                          |   3 +
+ pcs/lib/booth/status.py                      |  27 +-
+ pcs/lib/booth/test/test_status.py            |  26 +-
+ pcs/lib/cib/tools.py                         |   7 +-
+ pcs/lib/commands/booth.py                    |   5 +-
+ pcs/lib/commands/qdevice.py                  |  35 ++-
+ pcs/lib/commands/quorum.py                   |  12 +-
+ pcs/lib/commands/test/test_booth.py          |   4 +-
+ pcs/lib/corosync/live.py                     |  26 +-
+ pcs/lib/corosync/qdevice_client.py           |   9 +-
+ pcs/lib/corosync/qdevice_net.py              |  77 ++++--
+ pcs/lib/external.py                          | 105 +++++---
+ pcs/lib/pacemaker.py                         |  71 ++++--
+ pcs/lib/reports.py                           |  97 ++++----
+ pcs/lib/resource_agent.py                    |  31 ++-
+ pcs/lib/sbd.py                               |   4 +-
+ pcs/qdevice.py                               |   4 +-
+ pcs/test/resources/corosync-qdevice.conf     |  34 +++
+ pcs/test/test_common_tools.py                |  32 +++
+ pcs/test/test_lib_cib_tools.py               |  10 +-
+ pcs/test/test_lib_commands_qdevice.py        | 155 +++++++++++-
+ pcs/test/test_lib_commands_quorum.py         | 105 +++++++-
+ pcs/test/test_lib_corosync_live.py           |  30 ++-
+ pcs/test/test_lib_corosync_qdevice_client.py |   8 +-
+ pcs/test/test_lib_corosync_qdevice_net.py    | 110 +++++---
+ pcs/test/test_lib_external.py                | 167 +++++++------
+ pcs/test/test_lib_pacemaker.py               | 359 ++++++++++++++++++---------
+ pcs/test/test_lib_resource_agent.py          |  39 ++-
+ pcs/test/test_lib_sbd.py                     |  12 +-
+ 31 files changed, 1166 insertions(+), 488 deletions(-)
+ create mode 100644 pcs/test/resources/corosync-qdevice.conf
+
+diff --git a/pcs/cluster.py b/pcs/cluster.py
+index 577e08e..e5ad1ec 100644
+--- a/pcs/cluster.py
++++ b/pcs/cluster.py
+@@ -1414,7 +1414,6 @@ def cluster_node(argv):
+                 "cluster is not configured for RRP, "
+                 "you must not specify ring 1 address for the node"
+             )
+-        corosync_conf = None
+         (canAdd, error) =  utils.canAddNodeToCluster(node0)
+         if not canAdd:
+             utils.err("Unable to add '%s' to cluster: %s" % (node0, error))
+@@ -1422,7 +1421,29 @@ def cluster_node(argv):
+         report_processor = lib_env.report_processor
+         node_communicator = lib_env.node_communicator()
+         node_addr = NodeAddresses(node0, node1)
++
++        # First set up everything else than corosync. Once the new node is
++        # present in corosync.conf / cluster.conf, it's considered part of a
++        # cluster and the node add command cannot be run again. So we need to
++        # minimize the amout of actions (and therefore possible failures) after
++        # adding the node to corosync.
+         try:
++            # qdevice setup
++            if not utils.is_rhel6():
++                conf_facade = corosync_conf_facade.from_string(
++                    utils.getCorosyncConf()
++                )
++                qdevice_model, qdevice_model_options, _ = conf_facade.get_quorum_device_settings()
++                if qdevice_model == "net":
++                    _add_device_model_net(
++                        lib_env,
++                        qdevice_model_options["host"],
++                        conf_facade.get_cluster_name(),
++                        [node_addr],
++                        skip_offline_nodes=False
++                    )
++
++            # sbd setup
+             if lib_sbd.is_sbd_enabled(utils.cmd_runner()):
+                 if "--watchdog" not in utils.pcs_options:
+                     watchdog = settings.sbd_watchdog_default
+@@ -1463,6 +1484,7 @@ def cluster_node(argv):
+                     report_processor, node_communicator, node_addr
+                 )
+ 
++            # booth setup
+             booth_sync.send_all_config_to_node(
+                 node_communicator,
+                 report_processor,
+@@ -1477,6 +1499,8 @@ def cluster_node(argv):
+                 [node_communicator_exception_to_report_item(e)]
+             )
+ 
++        # Now add the new node to corosync.conf / cluster.conf
++        corosync_conf = None
+         for my_node in utils.getNodesFromCorosyncConf():
+             retval, output = utils.addLocalNode(my_node, node0, node1)
+             if retval != 0:
+@@ -1512,24 +1536,6 @@ def cluster_node(argv):
+                 except:
+                     utils.err('Unable to communicate with pcsd')
+ 
+-            # set qdevice-net certificates if needed
+-            if not utils.is_rhel6():
+-                try:
+-                    conf_facade = corosync_conf_facade.from_string(
+-                        corosync_conf
+-                    )
+-                    qdevice_model, qdevice_model_options, _ = conf_facade.get_quorum_device_settings()
+-                    if qdevice_model == "net":
+-                        _add_device_model_net(
+-                            lib_env,
+-                            qdevice_model_options["host"],
+-                            conf_facade.get_cluster_name(),
+-                            [node_addr],
+-                            skip_offline_nodes=False
+-                        )
+-                except LibraryError as e:
+-                    process_library_reports(e.args)
+-
+             print("Setting up corosync...")
+             utils.setCorosyncConfig(node0, corosync_conf)
+             if "--enable" in utils.pcs_options:
+diff --git a/pcs/common/report_codes.py b/pcs/common/report_codes.py
+index e6a86ec..23e931f 100644
+--- a/pcs/common/report_codes.py
++++ b/pcs/common/report_codes.py
+@@ -8,17 +8,18 @@ from __future__ import (
+ # force cathegories
+ FORCE_ACTIVE_RRP = "ACTIVE_RRP"
+ FORCE_ALERT_RECIPIENT_VALUE_NOT_UNIQUE = "FORCE_ALERT_RECIPIENT_VALUE_NOT_UNIQUE"
+-FORCE_BOOTH_REMOVE_FROM_CIB = "FORCE_BOOTH_REMOVE_FROM_CIB"
+ FORCE_BOOTH_DESTROY = "FORCE_BOOTH_DESTROY"
++FORCE_BOOTH_REMOVE_FROM_CIB = "FORCE_BOOTH_REMOVE_FROM_CIB"
+ FORCE_CONSTRAINT_DUPLICATE = "CONSTRAINT_DUPLICATE"
+ FORCE_CONSTRAINT_MULTIINSTANCE_RESOURCE = "CONSTRAINT_MULTIINSTANCE_RESOURCE"
+ FORCE_FILE_OVERWRITE = "FORCE_FILE_OVERWRITE"
+ FORCE_LOAD_THRESHOLD = "LOAD_THRESHOLD"
++FORCE_METADATA_ISSUE = "METADATA_ISSUE"
+ FORCE_OPTIONS = "OPTIONS"
+ FORCE_QDEVICE_MODEL = "QDEVICE_MODEL"
++FORCE_QDEVICE_USED = "QDEVICE_USED"
+ FORCE_UNKNOWN_AGENT = "UNKNOWN_AGENT"
+ FORCE_UNSUPPORTED_AGENT = "UNSUPPORTED_AGENT"
+-FORCE_METADATA_ISSUE = "METADATA_ISSUE"
+ SKIP_OFFLINE_NODES = "SKIP_OFFLINE_NODES"
+ SKIP_UNREADABLE_CONFIG = "SKIP_UNREADABLE_CONFIG"
+ 
+@@ -135,6 +136,7 @@ QDEVICE_NOT_DEFINED = "QDEVICE_NOT_DEFINED"
+ QDEVICE_NOT_INITIALIZED = "QDEVICE_NOT_INITIALIZED"
+ QDEVICE_CLIENT_RELOAD_STARTED = "QDEVICE_CLIENT_RELOAD_STARTED"
+ QDEVICE_REMOVE_OR_CLUSTER_STOP_NEEDED = "QDEVICE_REMOVE_OR_CLUSTER_STOP_NEEDED"
++QDEVICE_USED_BY_CLUSTERS = "QDEVICE_USED_BY_CLUSTERS"
+ REQUIRED_OPTION_IS_MISSING = "REQUIRED_OPTION_IS_MISSING"
+ RESOURCE_CLEANUP_ERROR = "RESOURCE_CLEANUP_ERROR"
+ RESOURCE_CLEANUP_TOO_TIME_CONSUMING = 'RESOURCE_CLEANUP_TOO_TIME_CONSUMING'
+diff --git a/pcs/common/tools.py b/pcs/common/tools.py
+index 275f6b9..01194a5 100644
+--- a/pcs/common/tools.py
++++ b/pcs/common/tools.py
+@@ -38,3 +38,6 @@ def format_environment_error(e):
+     if e.filename:
+         return "{0}: '{1}'".format(e.strerror, e.filename)
+     return e.strerror
++
++def join_multilines(strings):
++    return "\n".join([a.strip() for a in strings if a.strip()])
+diff --git a/pcs/lib/booth/status.py b/pcs/lib/booth/status.py
+index 4b93161..87cdc05 100644
+--- a/pcs/lib/booth/status.py
++++ b/pcs/lib/booth/status.py
+@@ -6,6 +6,7 @@ from __future__ import (
+ )
+ 
+ from pcs import settings
++from pcs.common.tools import join_multilines
+ from pcs.lib.booth import reports
+ from pcs.lib.errors import LibraryError
+ 
+@@ -14,28 +15,36 @@ def get_daemon_status(runner, name=None):
+     cmd = [settings.booth_binary, "status"]
+     if name:
+         cmd += ["-c", name]
+-    output, return_value = runner.run(cmd)
++    stdout, stderr, return_value = runner.run(cmd)
+     # 7 means that there is no booth instance running
+     if return_value not in [0, 7]:
+-        raise LibraryError(reports.booth_daemon_status_error(output))
+-    return output
++        raise LibraryError(
++            reports.booth_daemon_status_error(join_multilines([stderr, stdout]))
++        )
++    return stdout
+ 
+ 
+ def get_tickets_status(runner, name=None):
+     cmd = [settings.booth_binary, "list"]
+     if name:
+         cmd += ["-c", name]
+-    output, return_value = runner.run(cmd)
++    stdout, stderr, return_value = runner.run(cmd)
+     if return_value != 0:
+-        raise LibraryError(reports.booth_tickets_status_error(output))
+-    return output
++        raise LibraryError(
++            reports.booth_tickets_status_error(
++                join_multilines([stderr, stdout])
++            )
++        )
++    return stdout
+ 
+ 
+ def get_peers_status(runner, name=None):
+     cmd = [settings.booth_binary, "peers"]
+     if name:
+         cmd += ["-c", name]
+-    output, return_value = runner.run(cmd)
++    stdout, stderr, return_value = runner.run(cmd)
+     if return_value != 0:
+-        raise LibraryError(reports.booth_peers_status_error(output))
+-    return output
++        raise LibraryError(
++            reports.booth_peers_status_error(join_multilines([stderr, stdout]))
++        )
++    return stdout
+diff --git a/pcs/lib/booth/test/test_status.py b/pcs/lib/booth/test/test_status.py
+index d47ffca..dfb7354 100644
+--- a/pcs/lib/booth/test/test_status.py
++++ b/pcs/lib/booth/test/test_status.py
+@@ -30,34 +30,34 @@ class GetDaemonStatusTest(TestCase):
+         self.mock_run = mock.MagicMock(spec_set=CommandRunner)
+ 
+     def test_no_name(self):
+-        self.mock_run.run.return_value = ("output", 0)
++        self.mock_run.run.return_value = ("output", "", 0)
+         self.assertEqual("output", lib.get_daemon_status(self.mock_run))
+         self.mock_run.run.assert_called_once_with(
+             [settings.booth_binary, "status"]
+         )
+ 
+     def test_with_name(self):
+-        self.mock_run.run.return_value = ("output", 0)
++        self.mock_run.run.return_value = ("output", "", 0)
+         self.assertEqual("output", lib.get_daemon_status(self.mock_run, "name"))
+         self.mock_run.run.assert_called_once_with(
+             [settings.booth_binary, "status", "-c", "name"]
+         )
+ 
+     def test_daemon_not_running(self):
+-        self.mock_run.run.return_value = ("", 7)
++        self.mock_run.run.return_value = ("", "error", 7)
+         self.assertEqual("", lib.get_daemon_status(self.mock_run))
+         self.mock_run.run.assert_called_once_with(
+             [settings.booth_binary, "status"]
+         )
+ 
+     def test_failure(self):
+-        self.mock_run.run.return_value = ("out", 1)
++        self.mock_run.run.return_value = ("out", "error", 1)
+         assert_raise_library_error(
+             lambda: lib.get_daemon_status(self.mock_run),
+             (
+                 Severities.ERROR,
+                 report_codes.BOOTH_DAEMON_STATUS_ERROR,
+-                {"reason": "out"}
++                {"reason": "error\nout"}
+             )
+         )
+         self.mock_run.run.assert_called_once_with(
+@@ -70,14 +70,14 @@ class GetTicketsStatusTest(TestCase):
+         self.mock_run = mock.MagicMock(spec_set=CommandRunner)
+ 
+     def test_no_name(self):
+-        self.mock_run.run.return_value = ("output", 0)
++        self.mock_run.run.return_value = ("output", "", 0)
+         self.assertEqual("output", lib.get_tickets_status(self.mock_run))
+         self.mock_run.run.assert_called_once_with(
+             [settings.booth_binary, "list"]
+         )
+ 
+     def test_with_name(self):
+-        self.mock_run.run.return_value = ("output", 0)
++        self.mock_run.run.return_value = ("output", "", 0)
+         self.assertEqual(
+             "output", lib.get_tickets_status(self.mock_run, "name")
+         )
+@@ -86,14 +86,14 @@ class GetTicketsStatusTest(TestCase):
+         )
+ 
+     def test_failure(self):
+-        self.mock_run.run.return_value = ("out", 1)
++        self.mock_run.run.return_value = ("out", "error", 1)
+         assert_raise_library_error(
+             lambda: lib.get_tickets_status(self.mock_run),
+             (
+                 Severities.ERROR,
+                 report_codes.BOOTH_TICKET_STATUS_ERROR,
+                 {
+-                    "reason": "out"
++                    "reason": "error\nout"
+                 }
+             )
+         )
+@@ -107,28 +107,28 @@ class GetPeersStatusTest(TestCase):
+         self.mock_run = mock.MagicMock(spec_set=CommandRunner)
+ 
+     def test_no_name(self):
+-        self.mock_run.run.return_value = ("output", 0)
++        self.mock_run.run.return_value = ("output", "", 0)
+         self.assertEqual("output", lib.get_peers_status(self.mock_run))
+         self.mock_run.run.assert_called_once_with(
+             [settings.booth_binary, "peers"]
+         )
+ 
+     def test_with_name(self):
+-        self.mock_run.run.return_value = ("output", 0)
++        self.mock_run.run.return_value = ("output", "", 0)
+         self.assertEqual("output", lib.get_peers_status(self.mock_run, "name"))
+         self.mock_run.run.assert_called_once_with(
+             [settings.booth_binary, "peers", "-c", "name"]
+         )
+ 
+     def test_failure(self):
+-        self.mock_run.run.return_value = ("out", 1)
++        self.mock_run.run.return_value = ("out", "error", 1)
+         assert_raise_library_error(
+             lambda: lib.get_peers_status(self.mock_run),
+             (
+                 Severities.ERROR,
+                 report_codes.BOOTH_PEERS_STATUS_ERROR,
+                 {
+-                    "reason": "out"
++                    "reason": "error\nout"
+                 }
+             )
+         )
+diff --git a/pcs/lib/cib/tools.py b/pcs/lib/cib/tools.py
+index 8141360..6285931 100644
+--- a/pcs/lib/cib/tools.py
++++ b/pcs/lib/cib/tools.py
+@@ -11,6 +11,7 @@ import tempfile
+ from lxml import etree
+ 
+ from pcs import settings
++from pcs.common.tools import join_multilines
+ from pcs.lib import reports
+ from pcs.lib.errors import LibraryError
+ from pcs.lib.pacemaker_values import validate_id
+@@ -181,7 +182,7 @@ def upgrade_cib(cib, runner):
+         temp_file = tempfile.NamedTemporaryFile("w+", suffix=".pcs")
+         temp_file.write(etree.tostring(cib).decode())
+         temp_file.flush()
+-        output, retval = runner.run(
++        stdout, stderr, retval = runner.run(
+             [
+                 os.path.join(settings.pacemaker_binaries, "cibadmin"),
+                 "--upgrade",
+@@ -192,7 +193,9 @@ def upgrade_cib(cib, runner):
+ 
+         if retval != 0:
+             temp_file.close()
+-            raise LibraryError(reports.cib_upgrade_failed(output))
++            raise LibraryError(
++                reports.cib_upgrade_failed(join_multilines([stderr, stdout]))
++            )
+ 
+         temp_file.seek(0)
+         return etree.fromstring(temp_file.read())
+diff --git a/pcs/lib/commands/booth.py b/pcs/lib/commands/booth.py
+index 7a3d348..bea966c 100644
+--- a/pcs/lib/commands/booth.py
++++ b/pcs/lib/commands/booth.py
+@@ -10,6 +10,7 @@ import os.path
+ from functools import partial
+ 
+ from pcs import settings
++from pcs.common.tools import join_multilines
+ from pcs.lib import external, reports
+ from pcs.lib.booth import (
+     config_exchange,
+@@ -185,7 +186,7 @@ def ticket_operation(operation, env, name, ticket, site_ip):
+             )
+         site_ip = site_ip_list[0]
+ 
+-    command_output, return_code = env.cmd_runner().run([
++    stdout, stderr, return_code = env.cmd_runner().run([
+         settings.booth_binary, operation,
+         "-s", site_ip,
+         ticket
+@@ -195,7 +196,7 @@ def ticket_operation(operation, env, name, ticket, site_ip):
+         raise LibraryError(
+             booth_reports.booth_ticket_operation_failed(
+                 operation,
+-                command_output,
++                join_multilines([stderr, stdout]),
+                 site_ip,
+                 ticket
+             )
+diff --git a/pcs/lib/commands/qdevice.py b/pcs/lib/commands/qdevice.py
+index 1d1d85f..ca0ae86 100644
+--- a/pcs/lib/commands/qdevice.py
++++ b/pcs/lib/commands/qdevice.py
+@@ -8,9 +8,10 @@ from __future__ import (
+ import base64
+ import binascii
+ 
++from pcs.common import report_codes
+ from pcs.lib import external, reports
+ from pcs.lib.corosync import qdevice_net
+-from pcs.lib.errors import LibraryError
++from pcs.lib.errors import LibraryError, ReportItemSeverity
+ 
+ 
+ def qdevice_setup(lib_env, model, enable, start):
+@@ -31,13 +32,20 @@ def qdevice_setup(lib_env, model, enable, start):
+     if start:
+         _service_start(lib_env, qdevice_net.qdevice_start)
+ 
+-def qdevice_destroy(lib_env, model):
++def qdevice_destroy(lib_env, model, proceed_if_used=False):
+     """
+     Stop and disable qdevice on local host and remove its configuration
+     string model qdevice model to destroy
++    bool procced_if_used destroy qdevice even if it is used by clusters
+     """
+     _ensure_not_cman(lib_env)
+     _check_model(model)
++    _check_qdevice_not_used(
++        lib_env.report_processor,
++        lib_env.cmd_runner(),
++        model,
++        proceed_if_used
++    )
+     _service_stop(lib_env, qdevice_net.qdevice_stop)
+     _service_disable(lib_env, qdevice_net.qdevice_disable)
+     qdevice_net.qdevice_destroy()
+@@ -83,12 +91,20 @@ def qdevice_start(lib_env, model):
+     _check_model(model)
+     _service_start(lib_env, qdevice_net.qdevice_start)
+ 
+-def qdevice_stop(lib_env, model):
++def qdevice_stop(lib_env, model, proceed_if_used=False):
+     """
+     stop qdevice now on local host
++    string model qdevice model to destroy
++    bool procced_if_used stop qdevice even if it is used by clusters
+     """
+     _ensure_not_cman(lib_env)
+     _check_model(model)
++    _check_qdevice_not_used(
++        lib_env.report_processor,
++        lib_env.cmd_runner(),
++        model,
++        proceed_if_used
++    )
+     _service_stop(lib_env, qdevice_net.qdevice_stop)
+ 
+ def qdevice_kill(lib_env, model):
+@@ -176,6 +192,19 @@ def _check_model(model):
+             reports.invalid_option_value("model", model, ["net"])
+         )
+ 
++def _check_qdevice_not_used(reporter, runner, model, force=False):
++    _check_model(model)
++    connected_clusters = []
++    if model == "net":
++        status = qdevice_net.qdevice_status_cluster_text(runner)
++        connected_clusters = qdevice_net.qdevice_connected_clusters(status)
++    if connected_clusters:
++        reporter.process(reports.qdevice_used_by_clusters(
++            connected_clusters,
++            ReportItemSeverity.WARNING if force else ReportItemSeverity.ERROR,
++            None if force else report_codes.FORCE_QDEVICE_USED
++        ))
++
+ def _service_start(lib_env, func):
+     lib_env.report_processor.process(
+         reports.service_start_started("quorum device")
+diff --git a/pcs/lib/commands/quorum.py b/pcs/lib/commands/quorum.py
+index 7fb7bb4..8390fc6 100644
+--- a/pcs/lib/commands/quorum.py
++++ b/pcs/lib/commands/quorum.py
+@@ -283,14 +283,23 @@ def remove_device(lib_env, skip_offline_nodes=False):
+     cfg = lib_env.get_corosync_conf()
+     model, dummy_options, dummy_options = cfg.get_quorum_device_settings()
+     cfg.remove_quorum_device()
++
++    if lib_env.is_corosync_conf_live:
++        # fix quorum options for SBD to work properly
++        if sbd.atb_has_to_be_enabled(lib_env.cmd_runner(), cfg):
++            lib_env.report_processor.process(reports.sbd_requires_atb())
++            cfg.set_quorum_options(
++                lib_env.report_processor, {"auto_tie_breaker": "1"}
++            )
++
+     lib_env.push_corosync_conf(cfg, skip_offline_nodes)
+ 
+     if lib_env.is_corosync_conf_live:
++        communicator = lib_env.node_communicator()
+         # disable qdevice
+         lib_env.report_processor.process(
+             reports.service_disable_started("corosync-qdevice")
+         )
+-        communicator = lib_env.node_communicator()
+         parallel_nodes_communication_helper(
+             qdevice_client.remote_client_disable,
+             [
+@@ -304,7 +313,6 @@ def remove_device(lib_env, skip_offline_nodes=False):
+         lib_env.report_processor.process(
+             reports.service_stop_started("corosync-qdevice")
+         )
+-        communicator = lib_env.node_communicator()
+         parallel_nodes_communication_helper(
+             qdevice_client.remote_client_stop,
+             [
+diff --git a/pcs/lib/commands/test/test_booth.py b/pcs/lib/commands/test/test_booth.py
+index 08d2c79..6bcab2b 100644
+--- a/pcs/lib/commands/test/test_booth.py
++++ b/pcs/lib/commands/test/test_booth.py
+@@ -520,7 +520,7 @@ class TicketOperationTest(TestCase):
+         )
+ 
+     def test_raises_when_command_fail(self):
+-        mock_run = mock.Mock(return_value=("some message", 1))
++        mock_run = mock.Mock(return_value=("some message", "error", 1))
+         mock_env = mock.MagicMock(
+             cmd_runner=mock.Mock(return_value=mock.MagicMock(run=mock_run))
+         )
+@@ -533,7 +533,7 @@ class TicketOperationTest(TestCase):
+                 report_codes.BOOTH_TICKET_OPERATION_FAILED,
+                 {
+                     "operation": "grant",
+-                    "reason": "some message",
++                    "reason": "error\nsome message",
+                     "site_ip": "1.2.3.4",
+                     "ticket_name": "ABC",
+                 }
+diff --git a/pcs/lib/corosync/live.py b/pcs/lib/corosync/live.py
+index 1e68c31..67aa0e4 100644
+--- a/pcs/lib/corosync/live.py
++++ b/pcs/lib/corosync/live.py
+@@ -8,6 +8,7 @@ from __future__ import (
+ import os.path
+ 
+ from pcs import settings
++from pcs.common.tools import join_multilines
+ from pcs.lib import reports
+ from pcs.lib.errors import LibraryError
+ from pcs.lib.external import NodeCommunicator
+@@ -41,42 +42,39 @@ def reload_config(runner):
+     """
+     Ask corosync to reload its configuration
+     """
+-    output, retval = runner.run([
++    stdout, stderr, retval = runner.run([
+         os.path.join(settings.corosync_binaries, "corosync-cfgtool"),
+         "-R"
+     ])
+-    if retval != 0 or "invalid option" in output:
+-        raise LibraryError(
+-            reports.corosync_config_reload_error(output.rstrip())
+-        )
++    message = join_multilines([stderr, stdout])
++    if retval != 0 or "invalid option" in message:
++        raise LibraryError(reports.corosync_config_reload_error(message))
+ 
+ def get_quorum_status_text(runner):
+     """
+     Get runtime quorum status from the local node
+     """
+-    output, retval = runner.run([
++    stdout, stderr, retval = runner.run([
+         os.path.join(settings.corosync_binaries, "corosync-quorumtool"),
+         "-p"
+     ])
+     # retval is 0 on success if node is not in partition with quorum
+     # retval is 1 on error OR on success if node has quorum
+-    if retval not in [0, 1]:
+-        raise LibraryError(
+-            reports.corosync_quorum_get_status_error(output)
+-        )
+-    return output
++    if retval not in [0, 1] or stderr.strip():
++        raise LibraryError(reports.corosync_quorum_get_status_error(stderr))
++    return stdout
+ 
+ def set_expected_votes(runner, votes):
+     """
+     set expected votes in live cluster to specified value
+     """
+-    output, retval = runner.run([
++    stdout, stderr, retval = runner.run([
+         os.path.join(settings.corosync_binaries, "corosync-quorumtool"),
+         # format votes to handle the case where they are int
+         "-e", "{0}".format(votes)
+     ])
+     if retval != 0:
+         raise LibraryError(
+-            reports.corosync_quorum_set_expected_votes_error(output)
++            reports.corosync_quorum_set_expected_votes_error(stderr)
+         )
+-    return output
++    return stdout
+diff --git a/pcs/lib/corosync/qdevice_client.py b/pcs/lib/corosync/qdevice_client.py
+index 98fbb0e..c9d0095 100644
+--- a/pcs/lib/corosync/qdevice_client.py
++++ b/pcs/lib/corosync/qdevice_client.py
+@@ -8,6 +8,7 @@ from __future__ import (
+ import os.path
+ 
+ from pcs import settings
++from pcs.common.tools import join_multilines
+ from pcs.lib import reports
+ from pcs.lib.errors import LibraryError
+ 
+@@ -23,12 +24,14 @@ def get_status_text(runner, verbose=False):
+     ]
+     if verbose:
+         cmd.append("-v")
+-    output, retval = runner.run(cmd)
++    stdout, stderr, retval = runner.run(cmd)
+     if retval != 0:
+         raise LibraryError(
+-            reports.corosync_quorum_get_status_error(output)
++            reports.corosync_quorum_get_status_error(
++                join_multilines([stderr, stdout])
++            )
+         )
+-    return output
++    return stdout
+ 
+ def remote_client_enable(reporter, node_communicator, node):
+     """
+diff --git a/pcs/lib/corosync/qdevice_net.py b/pcs/lib/corosync/qdevice_net.py
+index 4054592..200e45a 100644
+--- a/pcs/lib/corosync/qdevice_net.py
++++ b/pcs/lib/corosync/qdevice_net.py
+@@ -15,6 +15,7 @@ import shutil
+ import tempfile
+ 
+ from pcs import settings
++from pcs.common.tools import join_multilines
+ from pcs.lib import external, reports
+ from pcs.lib.errors import LibraryError
+ 
+@@ -41,12 +42,15 @@ def qdevice_setup(runner):
+     if external.is_dir_nonempty(settings.corosync_qdevice_net_server_certs_dir):
+         raise LibraryError(reports.qdevice_already_initialized(__model))
+ 
+-    output, retval = runner.run([
++    stdout, stderr, retval = runner.run([
+         __qnetd_certutil, "-i"
+     ])
+     if retval != 0:
+         raise LibraryError(
+-            reports.qdevice_initialization_error(__model, output.rstrip())
++            reports.qdevice_initialization_error(
++                __model,
++                join_multilines([stderr, stdout])
++            )
+         )
+ 
+ def qdevice_initialized():
+@@ -78,10 +82,15 @@ def qdevice_status_generic_text(runner, verbose=False):
+     cmd = [__qnetd_tool, "-s"]
+     if verbose:
+         cmd.append("-v")
+-    output, retval = runner.run(cmd)
++    stdout, stderr, retval = runner.run(cmd)
+     if retval != 0:
+-        raise LibraryError(reports.qdevice_get_status_error(__model, output))
+-    return output
++        raise LibraryError(
++            reports.qdevice_get_status_error(
++                __model,
++                join_multilines([stderr, stdout])
++            )
++        )
++    return stdout
+ 
+ def qdevice_status_cluster_text(runner, cluster=None, verbose=False):
+     """
+@@ -94,10 +103,24 @@ def qdevice_status_cluster_text(runner, cluster=None, verbose=False):
+         cmd.append("-v")
+     if cluster:
+         cmd.extend(["-c", cluster])
+-    output, retval = runner.run(cmd)
++    stdout, stderr, retval = runner.run(cmd)
+     if retval != 0:
+-        raise LibraryError(reports.qdevice_get_status_error(__model, output))
+-    return output
++        raise LibraryError(
++            reports.qdevice_get_status_error(
++                __model,
++                join_multilines([stderr, stdout])
++            )
++        )
++    return stdout
++
++def qdevice_connected_clusters(status_cluster_text):
++    connected_clusters = []
++    regexp = re.compile(r'^Cluster "(?P<cluster>[^"]+)":$')
++    for line in status_cluster_text.splitlines():
++        match = regexp.search(line)
++        if match:
++            connected_clusters.append(match.group("cluster"))
++    return connected_clusters
+ 
+ def qdevice_enable(runner):
+     """
+@@ -143,17 +166,19 @@ def qdevice_sign_certificate_request(runner, cert_request, cluster_name):
+         reports.qdevice_certificate_sign_error
+     )
+     # sign the request
+-    output, retval = runner.run([
++    stdout, stderr, retval = runner.run([
+         __qnetd_certutil, "-s", "-c", tmpfile.name, "-n", cluster_name
+     ])
+     tmpfile.close() # temp file is deleted on close
+     if retval != 0:
+         raise LibraryError(
+-            reports.qdevice_certificate_sign_error(output.strip())
++            reports.qdevice_certificate_sign_error(
++                join_multilines([stderr, stdout])
++            )
+         )
+     # get signed certificate, corosync tool only works with files
+     return _get_output_certificate(
+-        output,
++        stdout,
+         reports.qdevice_certificate_sign_error
+     )
+ 
+@@ -181,12 +206,15 @@ def client_setup(runner, ca_certificate):
+             reports.qdevice_initialization_error(__model, e.strerror)
+         )
+     # initialize client's certificate storage
+-    output, retval = runner.run([
++    stdout, stderr, retval = runner.run([
+         __qdevice_certutil, "-i", "-c", ca_file_path
+     ])
+     if retval != 0:
+         raise LibraryError(
+-            reports.qdevice_initialization_error(__model, output.rstrip())
++            reports.qdevice_initialization_error(
++                __model,
++                join_multilines([stderr, stdout])
++            )
+         )
+ 
+ def client_initialized():
+@@ -217,15 +245,18 @@ def client_generate_certificate_request(runner, cluster_name):
+     """
+     if not client_initialized():
+         raise LibraryError(reports.qdevice_not_initialized(__model))
+-    output, retval = runner.run([
++    stdout, stderr, retval = runner.run([
+         __qdevice_certutil, "-r", "-n", cluster_name
+     ])
+     if retval != 0:
+         raise LibraryError(
+-            reports.qdevice_initialization_error(__model, output.rstrip())
++            reports.qdevice_initialization_error(
++                __model,
++                join_multilines([stderr, stdout])
++            )
+         )
+     return _get_output_certificate(
+-        output,
++        stdout,
+         functools.partial(reports.qdevice_initialization_error, __model)
+     )
+ 
+@@ -243,17 +274,19 @@ def client_cert_request_to_pk12(runner, cert_request):
+         reports.qdevice_certificate_import_error
+     )
+     # transform it
+-    output, retval = runner.run([
++    stdout, stderr, retval = runner.run([
+         __qdevice_certutil, "-M", "-c", tmpfile.name
+     ])
+     tmpfile.close() # temp file is deleted on close
+     if retval != 0:
+         raise LibraryError(
+-            reports.qdevice_certificate_import_error(output)
++            reports.qdevice_certificate_import_error(
++                join_multilines([stderr, stdout])
++            )
+         )
+     # get resulting pk12, corosync tool only works with files
+     return _get_output_certificate(
+-        output,
++        stdout,
+         reports.qdevice_certificate_import_error
+     )
+ 
+@@ -268,13 +301,15 @@ def client_import_certificate_and_key(runner, pk12_certificate):
+         pk12_certificate,
+         reports.qdevice_certificate_import_error
+     )
+-    output, retval = runner.run([
++    stdout, stderr, retval = runner.run([
+         __qdevice_certutil, "-m", "-c", tmpfile.name
+     ])
+     tmpfile.close() # temp file is deleted on close
+     if retval != 0:
+         raise LibraryError(
+-            reports.qdevice_certificate_import_error(output)
++            reports.qdevice_certificate_import_error(
++                join_multilines([stderr, stdout])
++            )
+         )
+ 
+ def remote_qdevice_get_ca_certificate(node_communicator, host):
+diff --git a/pcs/lib/external.py b/pcs/lib/external.py
+index 08bf2bb..074d2aa 100644
+--- a/pcs/lib/external.py
++++ b/pcs/lib/external.py
+@@ -47,14 +47,15 @@ except ImportError:
+         URLError as urllib_URLError
+     )
+ 
+-from pcs.lib import reports
+-from pcs.lib.errors import LibraryError, ReportItemSeverity
++from pcs import settings
+ from pcs.common import report_codes
+ from pcs.common.tools import (
++    join_multilines,
+     simple_cache,
+     run_parallel as tools_run_parallel,
+ )
+-from pcs import settings
++from pcs.lib import reports
++from pcs.lib.errors import LibraryError, ReportItemSeverity
+ 
+ 
+ class ManageServiceError(Exception):
+@@ -138,13 +139,17 @@ def disable_service(runner, service, instance=None):
+     if not is_service_installed(runner, service):
+         return
+     if is_systemctl():
+-        output, retval = runner.run([
++        stdout, stderr, retval = runner.run([
+             "systemctl", "disable", _get_service_name(service, instance)
+         ])
+     else:
+-        output, retval = runner.run(["chkconfig", service, "off"])
++        stdout, stderr, retval = runner.run(["chkconfig", service, "off"])
+     if retval != 0:
+-        raise DisableServiceError(service, output.rstrip(), instance)
++        raise DisableServiceError(
++            service,
++            join_multilines([stderr, stdout]),
++            instance
++        )
+ 
+ 
+ def enable_service(runner, service, instance=None):
+@@ -158,13 +163,17 @@ def enable_service(runner, service, instance=None):
+         If None no instance name will be used.
+     """
+     if is_systemctl():
+-        output, retval = runner.run([
++        stdout, stderr, retval = runner.run([
+             "systemctl", "enable", _get_service_name(service, instance)
+         ])
+     else:
+-        output, retval = runner.run(["chkconfig", service, "on"])
++        stdout, stderr, retval = runner.run(["chkconfig", service, "on"])
+     if retval != 0:
+-        raise EnableServiceError(service, output.rstrip(), instance)
++        raise EnableServiceError(
++            service,
++            join_multilines([stderr, stdout]),
++            instance
++        )
+ 
+ 
+ def start_service(runner, service, instance=None):
+@@ -176,13 +185,17 @@ def start_service(runner, service, instance=None):
+         If None no instance name will be used.
+     """
+     if is_systemctl():
+-        output, retval = runner.run([
++        stdout, stderr, retval = runner.run([
+             "systemctl", "start", _get_service_name(service, instance)
+         ])
+     else:
+-        output, retval = runner.run(["service", service, "start"])
++        stdout, stderr, retval = runner.run(["service", service, "start"])
+     if retval != 0:
+-        raise StartServiceError(service, output.rstrip(), instance)
++        raise StartServiceError(
++            service,
++            join_multilines([stderr, stdout]),
++            instance
++        )
+ 
+ 
+ def stop_service(runner, service, instance=None):
+@@ -194,13 +207,17 @@ def stop_service(runner, service, instance=None):
+         If None no instance name will be used.
+     """
+     if is_systemctl():
+-        output, retval = runner.run([
++        stdout, stderr, retval = runner.run([
+             "systemctl", "stop", _get_service_name(service, instance)
+         ])
+     else:
+-        output, retval = runner.run(["service", service, "stop"])
++        stdout, stderr, retval = runner.run(["service", service, "stop"])
+     if retval != 0:
+-        raise StopServiceError(service, output.rstrip(), instance)
++        raise StopServiceError(
++            service,
++            join_multilines([stderr, stdout]),
++            instance
++        )
+ 
+ 
+ def kill_services(runner, services):
+@@ -210,15 +227,16 @@ def kill_services(runner, services):
+     iterable services service names
+     """
+     # make killall not report that a process is not running
+-    output, retval = runner.run(
++    stdout, stderr, retval = runner.run(
+         ["killall", "--quiet", "--signal", "9", "--"] + list(services)
+     )
+     # If a process isn't running, killall will still return 1 even with --quiet.
+     # We don't consider that an error, so we check for output string as well.
+     # If it's empty, no actuall error happened.
+     if retval != 0:
+-        if output.strip():
+-            raise KillServicesError(list(services), output.rstrip())
++        message = join_multilines([stderr, stdout])
++        if message:
++            raise KillServicesError(list(services), message)
+ 
+ 
+ def is_service_enabled(runner, service, instance=None):
+@@ -229,11 +247,11 @@ def is_service_enabled(runner, service, instance=None):
+     service -- name of service
+     """
+     if is_systemctl():
+-        _, retval = runner.run(
++        dummy_stdout, dummy_stderr, retval = runner.run(
+             ["systemctl", "is-enabled", _get_service_name(service, instance)]
+         )
+     else:
+-        _, retval = runner.run(["chkconfig", service])
++        dummy_stdout, dummy_stderr, retval = runner.run(["chkconfig", service])
+ 
+     return retval == 0
+ 
+@@ -246,13 +264,15 @@ def is_service_running(runner, service, instance=None):
+     service -- name of service
+     """
+     if is_systemctl():
+-        _, retval = runner.run([
++        dummy_stdout, dummy_stderr, retval = runner.run([
+             "systemctl",
+             "is-active",
+             _get_service_name(service, instance)
+         ])
+     else:
+-        _, retval = runner.run(["service", service, "status"])
++        dummy_stdout, dummy_stderr, retval = runner.run(
++            ["service", service, "status"]
++        )
+ 
+     return retval == 0
+ 
+@@ -279,12 +299,12 @@ def get_non_systemd_services(runner):
+     if is_systemctl():
+         return []
+ 
+-    output, return_code = runner.run(["chkconfig"], ignore_stderr=True)
++    stdout, dummy_stderr, return_code = runner.run(["chkconfig"])
+     if return_code != 0:
+         return []
+ 
+     service_list = []
+-    for service in output.splitlines():
++    for service in stdout.splitlines():
+         service = service.split(" ", 1)[0]
+         if service:
+             service_list.append(service)
+@@ -300,12 +320,14 @@ def get_systemd_services(runner):
+     if not is_systemctl():
+         return []
+ 
+-    output, return_code = runner.run(["systemctl", "list-unit-files", "--full"])
++    stdout, dummy_stderr, return_code = runner.run([
++        "systemctl", "list-unit-files", "--full"
++    ])
+     if return_code != 0:
+         return []
+ 
+     service_list = []
+-    for service in output.splitlines():
++    for service in stdout.splitlines():
+         match = re.search(r'^([\S]*)\.service', service)
+         if match:
+             service_list.append(match.group(1))
+@@ -322,13 +344,13 @@ def is_cman_cluster(runner):
+     # - corosync1 runs with cman on rhel6
+     # - corosync1 can be used without cman, but we don't support it anyways
+     # - corosync2 is the default result if errors occur
+-    output, retval = runner.run([
++    stdout, dummy_stderr, retval = runner.run([
+         os.path.join(settings.corosync_binaries, "corosync"),
+         "-v"
+     ])
+     if retval != 0:
+         return False
+-    match = re.search(r"version\D+(\d+)", output)
++    match = re.search(r"version\D+(\d+)", stdout)
+     return match is not None and match.group(1) == "1"
+ 
+ 
+@@ -340,8 +362,7 @@ class CommandRunner(object):
+         self._python2 = sys.version[0] == "2"
+ 
+     def run(
+-        self, args, ignore_stderr=False, stdin_string=None, env_extend=None,
+-        binary_output=False
++        self, args, stdin_string=None, env_extend=None, binary_output=False
+     ):
+         #Reset environment variables by empty dict is desired here.  We need to
+         #get rid of defaults - we do not know the context and environment of the
+@@ -364,9 +385,7 @@ class CommandRunner(object):
+                 # Some commands react differently if they get anything via stdin
+                 stdin=(subprocess.PIPE if stdin_string is not None else None),
+                 stdout=subprocess.PIPE,
+-                stderr=(
+-                    subprocess.PIPE if ignore_stderr else subprocess.STDOUT
+-                ),
++                stderr=subprocess.PIPE,
+                 preexec_fn=(
+                     lambda: signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+                 ),
+@@ -376,7 +395,7 @@ class CommandRunner(object):
+                 # decodes newlines and in python3 also converts bytes to str
+                 universal_newlines=(not self._python2 and not binary_output)
+             )
+-            output, dummy_stderror = process.communicate(stdin_string)
++            out_std, out_err = process.communicate(stdin_string)
+             retval = process.returncode
+         except OSError as e:
+             raise LibraryError(
+@@ -386,13 +405,19 @@ class CommandRunner(object):
+         self._logger.debug(
+             (
+                 "Finished running: {args}\nReturn value: {retval}"
+-                + "\n--Debug Output Start--\n{output}\n--Debug Output End--"
+-            ).format(args=log_args, retval=retval, output=output)
+-        )
+-        self._reporter.process(
+-            reports.run_external_process_finished(log_args, retval, output)
++                + "\n--Debug Stdout Start--\n{out_std}\n--Debug Stdout End--"
++                + "\n--Debug Stderr Start--\n{out_err}\n--Debug Stderr End--"
++            ).format(
++                args=log_args,
++                retval=retval,
++                out_std=out_std,
++                out_err=out_err
++            )
+         )
+-        return output, retval
++        self._reporter.process(reports.run_external_process_finished(
++            log_args, retval, out_std, out_err
++        ))
++        return out_std, out_err, retval
+ 
+ 
+ class NodeCommunicationException(Exception):
+diff --git a/pcs/lib/pacemaker.py b/pcs/lib/pacemaker.py
+index fd6f97b..6747b22 100644
+--- a/pcs/lib/pacemaker.py
++++ b/pcs/lib/pacemaker.py
+@@ -9,6 +9,7 @@ import os.path
+ from lxml import etree
+ 
+ from pcs import settings
++from pcs.common.tools import join_multilines
+ from pcs.lib import reports
+ from pcs.lib.errors import LibraryError
+ from pcs.lib.pacemaker_state import ClusterState
+@@ -26,28 +27,33 @@ def __exec(name):
+     return os.path.join(settings.pacemaker_binaries, name)
+ 
+ def get_cluster_status_xml(runner):
+-    output, retval = runner.run(
++    stdout, stderr, retval = runner.run(
+         [__exec("crm_mon"), "--one-shot", "--as-xml", "--inactive"]
+     )
+     if retval != 0:
+         raise CrmMonErrorException(
+-            reports.cluster_state_cannot_load(retval, output)
++            reports.cluster_state_cannot_load(join_multilines([stderr, stdout]))
+         )
+-    return output
++    return stdout
+ 
+ def get_cib_xml(runner, scope=None):
+     command = [__exec("cibadmin"), "--local", "--query"]
+     if scope:
+         command.append("--scope={0}".format(scope))
+-    output, retval = runner.run(command)
++    stdout, stderr, retval = runner.run(command)
+     if retval != 0:
+         if retval == __EXITCODE_CIB_SCOPE_VALID_BUT_NOT_PRESENT and scope:
+             raise LibraryError(
+-                reports.cib_load_error_scope_missing(scope, retval, output)
++                reports.cib_load_error_scope_missing(
++                    scope,
++                    join_multilines([stderr, stdout])
++                )
+             )
+         else:
+-            raise LibraryError(reports.cib_load_error(retval, output))
+-    return output
++            raise LibraryError(
++                reports.cib_load_error(join_multilines([stderr, stdout]))
++            )
++    return stdout
+ 
+ def get_cib(xml):
+     try:
+@@ -59,9 +65,9 @@ def replace_cib_configuration_xml(runner, xml, cib_upgraded=False):
+     cmd = [__exec("cibadmin"), "--replace",  "--verbose", "--xml-pipe"]
+     if not cib_upgraded:
+         cmd += ["--scope", "configuration"]
+-    output, retval = runner.run(cmd, stdin_string=xml)
++    stdout, stderr, retval = runner.run(cmd, stdin_string=xml)
+     if retval != 0:
+-        raise LibraryError(reports.cib_push_error(retval, output))
++        raise LibraryError(reports.cib_push_error(stderr, stdout))
+ 
+ def replace_cib_configuration(runner, tree, cib_upgraded=False):
+     #etree returns bytes: b'xml'
+@@ -108,13 +114,18 @@ def resource_cleanup(runner, resource=None, node=None, force=False):
+     if node:
+         cmd.extend(["--node", node])
+ 
+-    output, retval = runner.run(cmd)
++    stdout, stderr, retval = runner.run(cmd)
+ 
+     if retval != 0:
+         raise LibraryError(
+-            reports.resource_cleanup_error(retval, output, resource, node)
++            reports.resource_cleanup_error(
++                join_multilines([stderr, stdout]),
++                resource,
++                node
++            )
+         )
+-    return output
++    # usefull output (what has been done) goes to stderr
++    return join_multilines([stdout, stderr])
+ 
+ def nodes_standby(runner, node_list=None, all_nodes=False):
+     return __nodes_standby_unstandby(runner, True, node_list, all_nodes)
+@@ -124,8 +135,11 @@ def nodes_unstandby(runner, node_list=None, all_nodes=False):
+ 
+ def has_resource_wait_support(runner):
+     # returns 1 on success so we don't care about retval
+-    output, dummy_retval = runner.run([__exec("crm_resource"), "-?"])
+-    return "--wait" in output
++    stdout, stderr, dummy_retval = runner.run(
++        [__exec("crm_resource"), "-?"]
++    )
++    # help goes to stderr but we check stdout as well if that gets changed
++    return "--wait" in stderr or "--wait" in stdout
+ 
+ def ensure_resource_wait_support(runner):
+     if not has_resource_wait_support(runner):
+@@ -135,15 +149,22 @@ def wait_for_resources(runner, timeout=None):
+     args = [__exec("crm_resource"), "--wait"]
+     if timeout is not None:
+         args.append("--timeout={0}".format(timeout))
+-    output, retval = runner.run(args)
++    stdout, stderr, retval = runner.run(args)
+     if retval != 0:
++        # Usefull info goes to stderr - not only error messages, a list of
++        # pending actions in case of timeout goes there as well.
++        # We use stdout just to be sure if that's get changed.
+         if retval == __EXITCODE_WAIT_TIMEOUT:
+             raise LibraryError(
+-                reports.resource_wait_timed_out(retval, output.strip())
++                reports.resource_wait_timed_out(
++                    join_multilines([stderr, stdout])
++                )
+             )
+         else:
+             raise LibraryError(
+-                reports.resource_wait_error(retval, output.strip())
++                reports.resource_wait_error(
++                    join_multilines([stderr, stdout])
++                )
+             )
+ 
+ def __nodes_standby_unstandby(
+@@ -178,9 +199,11 @@ def __nodes_standby_unstandby(
+         cmd_list.append(cmd_template)
+     report = []
+     for cmd in cmd_list:
+-        output, retval = runner.run(cmd)
++        stdout, stderr, retval = runner.run(cmd)
+         if retval != 0:
+-            report.append(reports.common_error(output))
++            report.append(
++                reports.common_error(join_multilines([stderr, stdout]))
++            )
+     if report:
+         raise LibraryError(*report)
+ 
+@@ -189,21 +212,23 @@ def __get_local_node_name(runner):
+     # but it returns false names when cluster is not running (or we are on
+     # a remote node). Getting node id first is reliable since it fails in those
+     # cases.
+-    output, retval = runner.run([__exec("crm_node"), "--cluster-id"])
++    stdout, dummy_stderr, retval = runner.run(
++        [__exec("crm_node"), "--cluster-id"]
++    )
+     if retval != 0:
+         raise LibraryError(
+             reports.pacemaker_local_node_name_not_found("node id not found")
+         )
+-    node_id = output.strip()
++    node_id = stdout.strip()
+ 
+-    output, retval = runner.run(
++    stdout, dummy_stderr, retval = runner.run(
+         [__exec("crm_node"), "--name-for-id={0}".format(node_id)]
+     )
+     if retval != 0:
+         raise LibraryError(
+             reports.pacemaker_local_node_name_not_found("node name not found")
+         )
+-    node_name = output.strip()
++    node_name = stdout.strip()
+ 
+     if node_name == "(null)":
+         raise LibraryError(
+diff --git a/pcs/lib/reports.py b/pcs/lib/reports.py
+index a701679..b9e9a66 100644
+--- a/pcs/lib/reports.py
++++ b/pcs/lib/reports.py
+@@ -262,21 +262,24 @@ def run_external_process_started(command, stdin):
+         }
+     )
+ 
+-def run_external_process_finished(command, retval, stdout):
++def run_external_process_finished(command, retval, stdout, stderr):
+     """
+     information about result of running an external process
+     command string the external process command
+     retval external process's return (exit) code
+     stdout string external process's stdout
++    stderr string external process's stderr
+     """
+     return ReportItem.debug(
+         report_codes.RUN_EXTERNAL_PROCESS_FINISHED,
+         "Finished running: {command}\nReturn value: {return_value}"
+-        + "\n--Debug Output Start--\n{stdout}\n--Debug Output End--\n",
++        + "\n--Debug Stdout Start--\n{stdout}\n--Debug Stdout End--"
++        + "\n--Debug Stderr Start--\n{stderr}\n--Debug Stderr End--\n",
+         info={
+             "command": command,
+             "return_value": retval,
+             "stdout": stdout,
++            "stderr": stderr,
+         }
+     )
+ 
+@@ -854,6 +857,23 @@ def qdevice_get_status_error(model, reason):
+         }
+     )
+ 
++def qdevice_used_by_clusters(
++    clusters, severity=ReportItemSeverity.ERROR, forceable=None
++):
++    """
++    Qdevice is currently being used by clusters, cannot stop it unless forced
++    """
++    return ReportItem(
++        report_codes.QDEVICE_USED_BY_CLUSTERS,
++        severity,
++        "Quorum device is currently being used by cluster(s): {clusters_str}",
++        info={
++            "clusters": clusters,
++            "clusters_str": ", ".join(clusters),
++        },
++        forceable=forceable
++    )
++
+ def cman_unsupported_command():
+     """
+     requested library command is not available as local cluster is CMAN based
+@@ -903,35 +923,31 @@ def resource_does_not_exist(resource_id):
+         }
+     )
+ 
+-def cib_load_error(retval, stdout):
++def cib_load_error(reason):
+     """
+     cannot load cib from cibadmin, cibadmin exited with non-zero code
+-    retval external process's return (exit) code
+-    stdout string external process's stdout
++    string reason error description
+     """
+     return ReportItem.error(
+         report_codes.CIB_LOAD_ERROR,
+         "unable to get cib",
+         info={
+-            "return_value": retval,
+-            "stdout": stdout,
++            "reason": reason,
+         }
+     )
+ 
+-def cib_load_error_scope_missing(scope, retval, stdout):
++def cib_load_error_scope_missing(scope, reason):
+     """
+     cannot load cib from cibadmin, specified scope is missing in the cib
+     scope string requested cib scope
+-    retval external process's return (exit) code
+-    stdout string external process's stdout
++    string reason error description
+     """
+     return ReportItem.error(
+         report_codes.CIB_LOAD_ERROR_SCOPE_MISSING,
+         "unable to get cib, scope '{scope}' not present in cib",
+         info={
+             "scope": scope,
+-            "return_value": retval,
+-            "stdout": stdout,
++            "reason": reason,
+         }
+     )
+ 
+@@ -957,33 +973,31 @@ def cib_missing_mandatory_section(section_name):
+         }
+     )
+ 
+-def cib_push_error(retval, stdout):
++def cib_push_error(reason, pushed_cib):
+     """
+     cannot push cib to cibadmin, cibadmin exited with non-zero code
+-    retval external process's return (exit) code
+-    stdout string external process's stdout
++    string reason error description
++    string pushed_cib cib which failed to be pushed
+     """
+     return ReportItem.error(
+         report_codes.CIB_PUSH_ERROR,
+-        "Unable to update cib\n{stdout}",
++        "Unable to update cib\n{reason}\n{pushed_cib}",
+         info={
+-            "return_value": retval,
+-            "stdout": stdout,
++            "reason": reason,
++            "pushed_cib": pushed_cib,
+         }
+     )
+ 
+-def cluster_state_cannot_load(retval, stdout):
++def cluster_state_cannot_load(reason):
+     """
+     cannot load cluster status from crm_mon, crm_mon exited with non-zero code
+-    retval external process's return (exit) code
+-    stdout string external process's stdout
++    string reason error description
+     """
+     return ReportItem.error(
+         report_codes.CRM_MON_ERROR,
+         "error running crm_mon, is pacemaker running?",
+         info={
+-            "return_value": retval,
+-            "stdout": stdout,
++            "reason": reason,
+         }
+     )
+ 
+@@ -1005,57 +1019,50 @@ def resource_wait_not_supported():
+         "crm_resource does not support --wait, please upgrade pacemaker"
+     )
+ 
+-def resource_wait_timed_out(retval, stdout):
++def resource_wait_timed_out(reason):
+     """
+     waiting for resources (crm_resource --wait) failed, timeout expired
+-    retval external process's return (exit) code
+-    stdout string external process's stdout
++    string reason error description
+     """
+     return ReportItem.error(
+         report_codes.RESOURCE_WAIT_TIMED_OUT,
+-        "waiting timeout\n\n{stdout}",
++        "waiting timeout\n\n{reason}",
+         info={
+-            "return_value": retval,
+-            "stdout": stdout,
++            "reason": reason,
+         }
+     )
+ 
+-def resource_wait_error(retval, stdout):
++def resource_wait_error(reason):
+     """
+     waiting for resources (crm_resource --wait) failed
+-    retval external process's return (exit) code
+-    stdout string external process's stdout
++    string reason error description
+     """
+     return ReportItem.error(
+         report_codes.RESOURCE_WAIT_ERROR,
+-        "{stdout}",
++        "{reason}",
+         info={
+-            "return_value": retval,
+-            "stdout": stdout,
++            "reason": reason,
+         }
+     )
+ 
+-def resource_cleanup_error(retval, stdout, resource=None, node=None):
++def resource_cleanup_error(reason, resource=None, node=None):
+     """
+     an error occured when deleting resource history in pacemaker
+-    retval external process's return (exit) code
+-    stdout string external process's stdout
+-    resource string resource which has been cleaned up
+-    node string node which has been cleaned up
++    string reason error description
++    string resource resource which has been cleaned up
++    string node node which has been cleaned up
+     """
+     if resource:
+-        text = "Unable to cleanup resource: {resource}\n{stdout}"
++        text = "Unable to cleanup resource: {resource}\n{reason}"
+     else:
+         text = (
+-            "Unexpected error occured. 'crm_resource -C' err_code: "
+-            + "{return_value}\n{stdout}"
++            "Unexpected error occured. 'crm_resource -C' error:\n{reason}"
+         )
+     return ReportItem.error(
+         report_codes.RESOURCE_CLEANUP_ERROR,
+         text,
+         info={
+-            "return_value": retval,
+-            "stdout": stdout,
++            "reason": reason,
+             "resource": resource,
+             "node": node,
+         }
+diff --git a/pcs/lib/resource_agent.py b/pcs/lib/resource_agent.py
+index ea93875..d49b5c0 100644
+--- a/pcs/lib/resource_agent.py
++++ b/pcs/lib/resource_agent.py
+@@ -125,14 +125,14 @@ def _get_pcmk_advanced_stonith_parameters(runner):
+     """
+     @simple_cache
+     def __get_stonithd_parameters():
+-        output, retval = runner.run(
+-            [settings.stonithd_binary, "metadata"], ignore_stderr=True
++        stdout, stderr, dummy_retval = runner.run(
++            [settings.stonithd_binary, "metadata"]
+         )
+-        if output.strip() == "":
+-            raise UnableToGetAgentMetadata("stonithd", output)
++        if stdout.strip() == "":
++            raise UnableToGetAgentMetadata("stonithd", stderr)
+ 
+         try:
+-            params = _get_agent_parameters(etree.fromstring(output))
++            params = _get_agent_parameters(etree.fromstring(stdout))
+             for param in params:
+                 param["longdesc"] = "{0}\n{1}".format(
+                     param["shortdesc"], param["longdesc"]
+@@ -166,15 +166,15 @@ def get_fence_agent_metadata(runner, fence_agent):
+     ):
+         raise AgentNotFound(fence_agent)
+ 
+-    output, retval = runner.run(
+-        [script_path, "-o", "metadata"], ignore_stderr=True
++    stdout, stderr, dummy_retval = runner.run(
++        [script_path, "-o", "metadata"]
+     )
+ 
+-    if output.strip() == "":
+-        raise UnableToGetAgentMetadata(fence_agent, output)
++    if stdout.strip() == "":
++        raise UnableToGetAgentMetadata(fence_agent, stderr)
+ 
+     try:
+-        return etree.fromstring(output)
++        return etree.fromstring(stdout)
+     except etree.XMLSyntaxError as e:
+         raise UnableToGetAgentMetadata(fence_agent, str(e))
+ 
+@@ -219,17 +219,16 @@ def _get_ocf_resource_agent_metadata(runner, provider, agent):
+     if not __is_path_abs(script_path) or not is_path_runnable(script_path):
+         raise AgentNotFound(agent_name)
+ 
+-    output, retval = runner.run(
++    stdout, stderr, dummy_retval = runner.run(
+         [script_path, "meta-data"],
+-        env_extend={"OCF_ROOT": settings.ocf_root},
+-        ignore_stderr=True
++        env_extend={"OCF_ROOT": settings.ocf_root}
+     )
+ 
+-    if output.strip() == "":
+-        raise UnableToGetAgentMetadata(agent_name, output)
++    if stdout.strip() == "":
++        raise UnableToGetAgentMetadata(agent_name, stderr)
+ 
+     try:
+-        return etree.fromstring(output)
++        return etree.fromstring(stdout)
+     except etree.XMLSyntaxError as e:
+         raise UnableToGetAgentMetadata(agent_name, str(e))
+ 
+diff --git a/pcs/lib/sbd.py b/pcs/lib/sbd.py
+index 39de740..9b57400 100644
+--- a/pcs/lib/sbd.py
++++ b/pcs/lib/sbd.py
+@@ -115,11 +115,11 @@ def atb_has_to_be_enabled(runner, corosync_conf_facade, node_number_modifier=0):
+         node.
+     """
+     return (
++        not corosync_conf_facade.is_enabled_auto_tie_breaker()
++        and
+         is_auto_tie_breaker_needed(
+             runner, corosync_conf_facade, node_number_modifier
+         )
+-        and
+-        not corosync_conf_facade.is_enabled_auto_tie_breaker()
+     )
+ 
+ 
+diff --git a/pcs/qdevice.py b/pcs/qdevice.py
+index 0037704..2591bae 100644
+--- a/pcs/qdevice.py
++++ b/pcs/qdevice.py
+@@ -92,7 +92,7 @@ def qdevice_destroy_cmd(lib, argv, modifiers):
+     if len(argv) != 1:
+         raise CmdLineInputError()
+     model = argv[0]
+-    lib.qdevice.destroy(model)
++    lib.qdevice.destroy(model, modifiers["force"])
+ 
+ def qdevice_start_cmd(lib, argv, modifiers):
+     if len(argv) != 1:
+@@ -104,7 +104,7 @@ def qdevice_stop_cmd(lib, argv, modifiers):
+     if len(argv) != 1:
+         raise CmdLineInputError()
+     model = argv[0]
+-    lib.qdevice.stop(model)
++    lib.qdevice.stop(model, modifiers["force"])
+ 
+ def qdevice_kill_cmd(lib, argv, modifiers):
+     if len(argv) != 1:
+diff --git a/pcs/test/resources/corosync-qdevice.conf b/pcs/test/resources/corosync-qdevice.conf
+new file mode 100644
+index 0000000..38998e7
+--- /dev/null
++++ b/pcs/test/resources/corosync-qdevice.conf
+@@ -0,0 +1,34 @@
++totem {
++    version: 2
++    secauth: off
++    cluster_name: test99
++    transport: udpu
++}
++
++nodelist {
++    node {
++        ring0_addr: rh7-1
++        nodeid: 1
++    }
++
++    node {
++        ring0_addr: rh7-2
++        nodeid: 2
++    }
++}
++
++quorum {
++    provider: corosync_votequorum
++
++    device {
++        model: net
++
++        net {
++            host: 127.0.0.1
++        }
++    }
++}
++
++logging {
++    to_syslog: yes
++}
+diff --git a/pcs/test/test_common_tools.py b/pcs/test/test_common_tools.py
+index 5290e6d..d9b6af3 100644
+--- a/pcs/test/test_common_tools.py
++++ b/pcs/test/test_common_tools.py
+@@ -63,3 +63,35 @@ class RunParallelTestCase(TestCase):
+         elapsed_time = finish_time - start_time
+         self.assertTrue(elapsed_time > x)
+         self.assertTrue(elapsed_time < sum([i + 1 for i in range(x)]))
++
++
++class JoinMultilinesTest(TestCase):
++    def test_empty_input(self):
++        self.assertEqual(
++            "",
++            tools.join_multilines([])
++        )
++
++    def test_two_strings(self):
++        self.assertEqual(
++            "a\nb",
++            tools.join_multilines(["a", "b"])
++        )
++
++    def test_strip(self):
++        self.assertEqual(
++            "a\nb",
++            tools.join_multilines(["  a\n", "  b\n"])
++        )
++
++    def test_skip_empty(self):
++        self.assertEqual(
++            "a\nb",
++            tools.join_multilines(["  a\n", "   \n", "  b\n"])
++        )
++
++    def test_multiline(self):
++        self.assertEqual(
++            "a\nA\nb\nB",
++            tools.join_multilines(["a\nA\n", "b\nB\n"])
++        )
+diff --git a/pcs/test/test_lib_cib_tools.py b/pcs/test/test_lib_cib_tools.py
+index ffc2642..ec9c312 100644
+--- a/pcs/test/test_lib_cib_tools.py
++++ b/pcs/test/test_lib_cib_tools.py
+@@ -383,7 +383,7 @@ class UpgradeCibTest(TestCase):
+         mock_file.name = "mock_file_name"
+         mock_file.read.return_value = "<cib/>"
+         mock_named_file.return_value = mock_file
+-        self.mock_runner.run.return_value = ("", 0)
++        self.mock_runner.run.return_value = ("", "", 0)
+         assert_xml_equal(
+             "<cib/>",
+             etree.tostring(
+@@ -408,13 +408,15 @@ class UpgradeCibTest(TestCase):
+         mock_file = mock.MagicMock()
+         mock_file.name = "mock_file_name"
+         mock_named_file.return_value = mock_file
+-        self.mock_runner.run.return_value = ("reason", 1)
++        self.mock_runner.run.return_value = ("some info", "some error", 1)
+         assert_raise_library_error(
+             lambda: lib.upgrade_cib(etree.XML("<old_cib/>"), self.mock_runner),
+             (
+                 severities.ERROR,
+                 report_codes.CIB_UPGRADE_FAILED,
+-                {"reason": "reason"}
++                {
++                    "reason": "some error\nsome info",
++                }
+             )
+         )
+         mock_named_file.assert_called_once_with("w+", suffix=".pcs")
+@@ -434,7 +436,7 @@ class UpgradeCibTest(TestCase):
+         mock_file.name = "mock_file_name"
+         mock_file.read.return_value = "not xml"
+         mock_named_file.return_value = mock_file
+-        self.mock_runner.run.return_value = ("", 0)
++        self.mock_runner.run.return_value = ("", "", 0)
+         assert_raise_library_error(
+             lambda: lib.upgrade_cib(etree.XML("<old_cib/>"), self.mock_runner),
+             (
+diff --git a/pcs/test/test_lib_commands_qdevice.py b/pcs/test/test_lib_commands_qdevice.py
+index 10841e9..756afa8 100644
+--- a/pcs/test/test_lib_commands_qdevice.py
++++ b/pcs/test/test_lib_commands_qdevice.py
+@@ -345,6 +345,7 @@ class QdeviceNetSetupTest(QdeviceTestCase):
+         )
+ 
+ 
++@mock.patch("pcs.lib.corosync.qdevice_net.qdevice_status_cluster_text")
+ @mock.patch("pcs.lib.external.stop_service")
+ @mock.patch("pcs.lib.external.disable_service")
+ @mock.patch("pcs.lib.commands.qdevice.qdevice_net.qdevice_destroy")
+@@ -355,7 +356,11 @@ class QdeviceNetSetupTest(QdeviceTestCase):
+     lambda self: "mock_runner"
+ )
+ class QdeviceNetDestroyTest(QdeviceTestCase):
+-    def test_success(self, mock_net_destroy, mock_net_disable, mock_net_stop):
++    def test_success_not_used(
++        self, mock_net_destroy, mock_net_disable, mock_net_stop, mock_status
++    ):
++        mock_status.return_value = ""
++
+         lib.qdevice_destroy(self.lib_env, "net")
+ 
+         mock_net_stop.assert_called_once_with("mock_runner", "corosync-qnetd")
+@@ -398,9 +403,85 @@ class QdeviceNetDestroyTest(QdeviceTestCase):
+             ]
+         )
+ 
++    def test_success_used_forced(
++        self, mock_net_destroy, mock_net_disable, mock_net_stop, mock_status
++    ):
++        mock_status.return_value = 'Cluster "a_cluster":\n'
++
++        lib.qdevice_destroy(self.lib_env, "net", proceed_if_used=True)
++
++        mock_net_stop.assert_called_once_with("mock_runner", "corosync-qnetd")
++        mock_net_disable.assert_called_once_with(
++            "mock_runner",
++            "corosync-qnetd"
++        )
++        mock_net_destroy.assert_called_once_with()
++        assert_report_item_list_equal(
++            self.mock_reporter.report_item_list,
++            [
++                (
++                    severity.WARNING,
++                    report_codes.QDEVICE_USED_BY_CLUSTERS,
++                    {
++                        "clusters": ["a_cluster"],
++                    }
++                ),
++                (
++                    severity.INFO,
++                    report_codes.SERVICE_STOP_STARTED,
++                    {
++                        "service": "quorum device",
++                    }
++                ),
++                (
++                    severity.INFO,
++                    report_codes.SERVICE_STOP_SUCCESS,
++                    {
++                        "service": "quorum device",
++                    }
++                ),
++                (
++                    severity.INFO,
++                    report_codes.SERVICE_DISABLE_SUCCESS,
++                    {
++                        "service": "quorum device",
++                    }
++                ),
++                (
++                    severity.INFO,
++                    report_codes.QDEVICE_DESTROY_SUCCESS,
++                    {
++                        "model": "net",
++                    }
++                )
++            ]
++        )
++
++    def test_used_not_forced(
++        self, mock_net_destroy, mock_net_disable, mock_net_stop, mock_status
++    ):
++        mock_status.return_value = 'Cluster "a_cluster":\n'
++
++        assert_raise_library_error(
++            lambda: lib.qdevice_destroy(self.lib_env, "net"),
++            (
++                severity.ERROR,
++                report_codes.QDEVICE_USED_BY_CLUSTERS,
++                {
++                    "clusters": ["a_cluster"],
++                },
++                report_codes.FORCE_QDEVICE_USED
++            ),
++        )
++
++        mock_net_stop.assert_not_called()
++        mock_net_disable.assert_not_called()
++        mock_net_destroy.assert_not_called()
++
+     def test_stop_failed(
+-        self, mock_net_destroy, mock_net_disable, mock_net_stop
++        self, mock_net_destroy, mock_net_disable, mock_net_stop, mock_status
+     ):
++        mock_status.return_value = ""
+         mock_net_stop.side_effect = StopServiceError(
+             "test service",
+             "test error"
+@@ -435,8 +516,9 @@ class QdeviceNetDestroyTest(QdeviceTestCase):
+         )
+ 
+     def test_disable_failed(
+-        self, mock_net_destroy, mock_net_disable, mock_net_stop
++        self, mock_net_destroy, mock_net_disable, mock_net_stop, mock_status
+     ):
++        mock_status.return_value = ""
+         mock_net_disable.side_effect = DisableServiceError(
+             "test service",
+             "test error"
+@@ -481,8 +563,9 @@ class QdeviceNetDestroyTest(QdeviceTestCase):
+         )
+ 
+     def test_destroy_failed(
+-        self, mock_net_destroy, mock_net_disable, mock_net_stop
++        self, mock_net_destroy, mock_net_disable, mock_net_stop, mock_status
+     ):
++        mock_status.return_value = ""
+         mock_net_destroy.side_effect = LibraryError("mock_report_item")
+ 
+         self.assertRaises(
+@@ -755,6 +838,7 @@ class QdeviceNetStartTest(QdeviceTestCase):
+         )
+ 
+ 
++@mock.patch("pcs.lib.corosync.qdevice_net.qdevice_status_cluster_text")
+ @mock.patch("pcs.lib.external.stop_service")
+ @mock.patch("pcs.lib.env.is_cman_cluster", lambda self: False)
+ @mock.patch.object(
+@@ -763,13 +847,49 @@ class QdeviceNetStartTest(QdeviceTestCase):
+     lambda self: "mock_runner"
+ )
+ class QdeviceNetStopTest(QdeviceTestCase):
+-    def test_success(self, mock_net_stop):
+-        lib.qdevice_stop(self.lib_env, "net")
++    def test_success_not_used(self, mock_net_stop, mock_status):
++        mock_status.return_value = ""
++
++        lib.qdevice_stop(self.lib_env, "net", proceed_if_used=False)
++
++        mock_net_stop.assert_called_once_with("mock_runner", "corosync-qnetd")
++        assert_report_item_list_equal(
++            self.mock_reporter.report_item_list,
++            [
++                (
++                    severity.INFO,
++                    report_codes.SERVICE_STOP_STARTED,
++                    {
++                        "service": "quorum device",
++                    }
++                ),
++                (
++                    severity.INFO,
++                    report_codes.SERVICE_STOP_SUCCESS,
++                    {
++                        "service": "quorum device",
++                    }
++                )
++            ]
++        )
++
++    def test_success_used_forced(self, mock_net_stop, mock_status):
++        mock_status.return_value = 'Cluster "a_cluster":\n'
++
++        lib.qdevice_stop(self.lib_env, "net", proceed_if_used=True)
++
+         mock_net_stop.assert_called_once_with("mock_runner", "corosync-qnetd")
+         assert_report_item_list_equal(
+             self.mock_reporter.report_item_list,
+             [
+                 (
++                    severity.WARNING,
++                    report_codes.QDEVICE_USED_BY_CLUSTERS,
++                    {
++                        "clusters": ["a_cluster"],
++                    }
++                ),
++                (
+                     severity.INFO,
+                     report_codes.SERVICE_STOP_STARTED,
+                     {
+@@ -786,7 +906,28 @@ class QdeviceNetStopTest(QdeviceTestCase):
+             ]
+         )
+ 
+-    def test_failed(self, mock_net_stop):
++    def test_used_not_forced(self, mock_net_stop, mock_status):
++        mock_status.return_value = 'Cluster "a_cluster":\n'
++
++        assert_raise_library_error(
++            lambda: lib.qdevice_stop(
++                self.lib_env,
++                "net",
++                proceed_if_used=False
++            ),
++            (
++                severity.ERROR,
++                report_codes.QDEVICE_USED_BY_CLUSTERS,
++                {
++                    "clusters": ["a_cluster"],
++                },
++                report_codes.FORCE_QDEVICE_USED
++            ),
++        )
++        mock_net_stop.assert_not_called()
++
++    def test_failed(self, mock_net_stop, mock_status):
++        mock_status.return_value = ""
+         mock_net_stop.side_effect = StopServiceError(
+             "test service",
+             "test error"
+diff --git a/pcs/test/test_lib_commands_quorum.py b/pcs/test/test_lib_commands_quorum.py
+index d7701af..1487eb4 100644
+--- a/pcs/test/test_lib_commands_quorum.py
++++ b/pcs/test/test_lib_commands_quorum.py
+@@ -1579,10 +1579,14 @@ class RemoveDeviceTest(TestCase, CmanMixin):
+         mock_remote_stop.assert_not_called()
+ 
+     @mock.patch("pcs.lib.env.is_cman_cluster", lambda self: False)
+-    def test_success(
++    @mock.patch("pcs.lib.sbd.is_sbd_installed", lambda self: True)
++    @mock.patch("pcs.lib.sbd.is_sbd_enabled", lambda self: True)
++    def test_success_3nodes_sbd(
+         self, mock_remote_stop, mock_remote_disable, mock_remove_net,
+         mock_get_corosync, mock_push_corosync
+     ):
++        # nothing special needs to be done in regards of SBD if a cluster
++        # consists of odd number of nodes
+         original_conf = open(rc("corosync-3nodes-qdevice.conf")).read()
+         no_device_conf = open(rc("corosync-3nodes.conf")).read()
+         mock_get_corosync.return_value = original_conf
+@@ -1619,10 +1623,106 @@ class RemoveDeviceTest(TestCase, CmanMixin):
+         self.assertEqual(3, len(mock_remote_stop.mock_calls))
+ 
+     @mock.patch("pcs.lib.env.is_cman_cluster", lambda self: False)
+-    def test_success_file(
++    @mock.patch("pcs.lib.sbd.is_sbd_installed", lambda self: False)
++    @mock.patch("pcs.lib.sbd.is_sbd_enabled", lambda self: False)
++    def test_success_2nodes_no_sbd(
++        self, mock_remote_stop, mock_remote_disable, mock_remove_net,
++        mock_get_corosync, mock_push_corosync
++    ):
++        # cluster consists of two nodes, two_node must be set
++        original_conf = open(rc("corosync-qdevice.conf")).read()
++        no_device_conf = open(rc("corosync.conf")).read()
++        mock_get_corosync.return_value = original_conf
++        lib_env = LibraryEnvironment(self.mock_logger, self.mock_reporter)
++
++        lib.remove_device(lib_env)
++
++        self.assertEqual(1, len(mock_push_corosync.mock_calls))
++        ac(
++            mock_push_corosync.mock_calls[0][1][0].config.export(),
++            no_device_conf
++        )
++        assert_report_item_list_equal(
++            self.mock_reporter.report_item_list,
++            [
++                (
++                    severity.INFO,
++                    report_codes.SERVICE_DISABLE_STARTED,
++                    {
++                        "service": "corosync-qdevice",
++                    }
++                ),
++                (
++                    severity.INFO,
++                    report_codes.SERVICE_STOP_STARTED,
++                    {
++                        "service": "corosync-qdevice",
++                    }
++                ),
++            ]
++        )
++        self.assertEqual(1, len(mock_remove_net.mock_calls))
++        self.assertEqual(2, len(mock_remote_disable.mock_calls))
++        self.assertEqual(2, len(mock_remote_stop.mock_calls))
++
++    @mock.patch("pcs.lib.env.is_cman_cluster", lambda self: False)
++    @mock.patch("pcs.lib.sbd.is_sbd_installed", lambda self: True)
++    @mock.patch("pcs.lib.sbd.is_sbd_enabled", lambda self: True)
++    def test_success_2nodes_sbd(
+         self, mock_remote_stop, mock_remote_disable, mock_remove_net,
+         mock_get_corosync, mock_push_corosync
+     ):
++        # cluster consists of two nodes, but SBD is in use
++        # auto tie breaker must be enabled
++        original_conf = open(rc("corosync-qdevice.conf")).read()
++        no_device_conf = open(rc("corosync.conf")).read().replace(
++            "two_node: 1",
++            "auto_tie_breaker: 1"
++        )
++        mock_get_corosync.return_value = original_conf
++        lib_env = LibraryEnvironment(self.mock_logger, self.mock_reporter)
++
++        lib.remove_device(lib_env)
++
++        self.assertEqual(1, len(mock_push_corosync.mock_calls))
++        ac(
++            mock_push_corosync.mock_calls[0][1][0].config.export(),
++            no_device_conf
++        )
++        assert_report_item_list_equal(
++            self.mock_reporter.report_item_list,
++            [
++                (
++                    severity.WARNING,
++                    report_codes.SBD_REQUIRES_ATB,
++                    {}
++                ),
++                (
++                    severity.INFO,
++                    report_codes.SERVICE_DISABLE_STARTED,
++                    {
++                        "service": "corosync-qdevice",
++                    }
++                ),
++                (
++                    severity.INFO,
++                    report_codes.SERVICE_STOP_STARTED,
++                    {
++                        "service": "corosync-qdevice",
++                    }
++                ),
++            ]
++        )
++        self.assertEqual(1, len(mock_remove_net.mock_calls))
++        self.assertEqual(2, len(mock_remote_disable.mock_calls))
++        self.assertEqual(2, len(mock_remote_stop.mock_calls))
++
++    @mock.patch("pcs.lib.sbd.atb_has_to_be_enabled")
++    @mock.patch("pcs.lib.env.is_cman_cluster", lambda self: False)
++    def test_success_file(
++        self, mock_atb_check, mock_remote_stop, mock_remote_disable,
++        mock_remove_net, mock_get_corosync, mock_push_corosync
++    ):
+         original_conf = open(rc("corosync-3nodes-qdevice.conf")).read()
+         no_device_conf = open(rc("corosync-3nodes.conf")).read()
+         mock_get_corosync.return_value = original_conf
+@@ -1643,6 +1743,7 @@ class RemoveDeviceTest(TestCase, CmanMixin):
+         mock_remove_net.assert_not_called()
+         mock_remote_disable.assert_not_called()
+         mock_remote_stop.assert_not_called()
++        mock_atb_check.assert_not_called()
+ 
+ 
+ @mock.patch("pcs.lib.commands.quorum.qdevice_net.remote_client_destroy")
+diff --git a/pcs/test/test_lib_corosync_live.py b/pcs/test/test_lib_corosync_live.py
+index 3173195..f03d78b 100644
+--- a/pcs/test/test_lib_corosync_live.py
++++ b/pcs/test/test_lib_corosync_live.py
+@@ -69,9 +69,10 @@ class ReloadConfigTest(TestCase):
+ 
+     def test_success(self):
+         cmd_retval = 0
+-        cmd_output = "cmd output"
++        cmd_stdout = "cmd output"
++        cmd_stderr = ""
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (cmd_output, cmd_retval)
++        mock_runner.run.return_value = (cmd_stdout, cmd_stderr, cmd_retval)
+ 
+         lib.reload_config(mock_runner)
+ 
+@@ -81,9 +82,10 @@ class ReloadConfigTest(TestCase):
+ 
+     def test_error(self):
+         cmd_retval = 1
+-        cmd_output = "cmd output"
++        cmd_stdout = "cmd output"
++        cmd_stderr = "cmd error"
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (cmd_output, cmd_retval)
++        mock_runner.run.return_value = (cmd_stdout, cmd_stderr, cmd_retval)
+ 
+         assert_raise_library_error(
+             lambda: lib.reload_config(mock_runner),
+@@ -91,7 +93,7 @@ class ReloadConfigTest(TestCase):
+                 severity.ERROR,
+                 report_codes.COROSYNC_CONFIG_RELOAD_ERROR,
+                 {
+-                    "reason": cmd_output,
++                    "reason": "\n".join([cmd_stderr, cmd_stdout]),
+                 }
+             )
+         )
+@@ -107,7 +109,7 @@ class GetQuorumStatusTextTest(TestCase):
+         self.quorum_tool = "/usr/sbin/corosync-quorumtool"
+ 
+     def test_success(self):
+-        self.mock_runner.run.return_value = ("status info", 0)
++        self.mock_runner.run.return_value = ("status info", "", 0)
+         self.assertEqual(
+             "status info",
+             lib.get_quorum_status_text(self.mock_runner)
+@@ -117,7 +119,7 @@ class GetQuorumStatusTextTest(TestCase):
+         ])
+ 
+     def test_success_with_retval_1(self):
+-        self.mock_runner.run.return_value = ("status info", 1)
++        self.mock_runner.run.return_value = ("status info", "", 1)
+         self.assertEqual(
+             "status info",
+             lib.get_quorum_status_text(self.mock_runner)
+@@ -127,7 +129,7 @@ class GetQuorumStatusTextTest(TestCase):
+         ])
+ 
+     def test_error(self):
+-        self.mock_runner.run.return_value = ("status error", 2)
++        self.mock_runner.run.return_value = ("some info", "status error", 2)
+         assert_raise_library_error(
+             lambda: lib.get_quorum_status_text(self.mock_runner),
+             (
+@@ -152,9 +154,10 @@ class SetExpectedVotesTest(TestCase):
+ 
+     def test_success(self):
+         cmd_retval = 0
+-        cmd_output = "cmd output"
++        cmd_stdout = "cmd output"
++        cmd_stderr = ""
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (cmd_output, cmd_retval)
++        mock_runner.run.return_value = (cmd_stdout, cmd_stderr, cmd_retval)
+ 
+         lib.set_expected_votes(mock_runner, 3)
+ 
+@@ -164,9 +167,10 @@ class SetExpectedVotesTest(TestCase):
+ 
+     def test_error(self):
+         cmd_retval = 1
+-        cmd_output = "cmd output"
++        cmd_stdout = "cmd output"
++        cmd_stderr = "cmd stderr"
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (cmd_output, cmd_retval)
++        mock_runner.run.return_value = (cmd_stdout, cmd_stderr, cmd_retval)
+ 
+         assert_raise_library_error(
+             lambda: lib.set_expected_votes(mock_runner, 3),
+@@ -174,7 +178,7 @@ class SetExpectedVotesTest(TestCase):
+                 severity.ERROR,
+                 report_codes.COROSYNC_QUORUM_SET_EXPECTED_VOTES_ERROR,
+                 {
+-                    "reason": cmd_output,
++                    "reason": cmd_stderr,
+                 }
+             )
+         )
+diff --git a/pcs/test/test_lib_corosync_qdevice_client.py b/pcs/test/test_lib_corosync_qdevice_client.py
+index 0b5bd67..8c32c36 100644
+--- a/pcs/test/test_lib_corosync_qdevice_client.py
++++ b/pcs/test/test_lib_corosync_qdevice_client.py
+@@ -23,7 +23,7 @@ class GetStatusTextTest(TestCase):
+         self.qdevice_tool = "/usr/sbin/corosync-qdevice-tool"
+ 
+     def test_success(self):
+-        self.mock_runner.run.return_value = ("status info", 0)
++        self.mock_runner.run.return_value = ("status info", "", 0)
+         self.assertEqual(
+             "status info",
+             lib.get_status_text(self.mock_runner)
+@@ -33,7 +33,7 @@ class GetStatusTextTest(TestCase):
+         ])
+ 
+     def test_success_verbose(self):
+-        self.mock_runner.run.return_value = ("status info", 0)
++        self.mock_runner.run.return_value = ("status info", "", 0)
+         self.assertEqual(
+             "status info",
+             lib.get_status_text(self.mock_runner, True)
+@@ -43,14 +43,14 @@ class GetStatusTextTest(TestCase):
+         ])
+ 
+     def test_error(self):
+-        self.mock_runner.run.return_value = ("status error", 1)
++        self.mock_runner.run.return_value = ("some info", "status error", 1)
+         assert_raise_library_error(
+             lambda: lib.get_status_text(self.mock_runner),
+             (
+                 severity.ERROR,
+                 report_codes.COROSYNC_QUORUM_GET_STATUS_ERROR,
+                 {
+-                    "reason": "status error",
++                    "reason": "status error\nsome info",
+                 }
+             )
+         )
+diff --git a/pcs/test/test_lib_corosync_qdevice_net.py b/pcs/test/test_lib_corosync_qdevice_net.py
+index 340a8dc..21c526b 100644
+--- a/pcs/test/test_lib_corosync_qdevice_net.py
++++ b/pcs/test/test_lib_corosync_qdevice_net.py
+@@ -49,7 +49,7 @@ class QdeviceSetupTest(TestCase):
+ 
+     def test_success(self, mock_is_dir_nonempty):
+         mock_is_dir_nonempty.return_value = False
+-        self.mock_runner.run.return_value = ("initialized", 0)
++        self.mock_runner.run.return_value = ("initialized", "", 0)
+ 
+         lib.qdevice_setup(self.mock_runner)
+ 
+@@ -73,7 +73,7 @@ class QdeviceSetupTest(TestCase):
+ 
+     def test_init_tool_fail(self, mock_is_dir_nonempty):
+         mock_is_dir_nonempty.return_value = False
+-        self.mock_runner.run.return_value = ("test error", 1)
++        self.mock_runner.run.return_value = ("stdout", "test error", 1)
+ 
+         assert_raise_library_error(
+             lambda: lib.qdevice_setup(self.mock_runner),
+@@ -82,7 +82,7 @@ class QdeviceSetupTest(TestCase):
+                 report_codes.QDEVICE_INITIALIZATION_ERROR,
+                 {
+                     "model": "net",
+-                    "reason": "test error",
++                    "reason": "test error\nstdout",
+                 }
+             )
+         )
+@@ -126,7 +126,7 @@ class QdeviceStatusGenericTest(TestCase):
+         self.mock_runner = mock.MagicMock(spec_set=CommandRunner)
+ 
+     def test_success(self):
+-        self.mock_runner.run.return_value = ("status info", 0)
++        self.mock_runner.run.return_value = ("status info", "", 0)
+         self.assertEqual(
+             "status info",
+             lib.qdevice_status_generic_text(self.mock_runner)
+@@ -134,7 +134,7 @@ class QdeviceStatusGenericTest(TestCase):
+         self.mock_runner.run.assert_called_once_with([_qnetd_tool, "-s"])
+ 
+     def test_success_verbose(self):
+-        self.mock_runner.run.return_value = ("status info", 0)
++        self.mock_runner.run.return_value = ("status info", "", 0)
+         self.assertEqual(
+             "status info",
+             lib.qdevice_status_generic_text(self.mock_runner, True)
+@@ -142,7 +142,7 @@ class QdeviceStatusGenericTest(TestCase):
+         self.mock_runner.run.assert_called_once_with([_qnetd_tool, "-s", "-v"])
+ 
+     def test_error(self):
+-        self.mock_runner.run.return_value = ("status error", 1)
++        self.mock_runner.run.return_value = ("some info", "status error", 1)
+         assert_raise_library_error(
+             lambda: lib.qdevice_status_generic_text(self.mock_runner),
+             (
+@@ -150,7 +150,7 @@ class QdeviceStatusGenericTest(TestCase):
+                 report_codes.QDEVICE_GET_STATUS_ERROR,
+                 {
+                     "model": "net",
+-                    "reason": "status error",
++                    "reason": "status error\nsome info",
+                 }
+             )
+         )
+@@ -162,7 +162,7 @@ class QdeviceStatusClusterTest(TestCase):
+         self.mock_runner = mock.MagicMock(spec_set=CommandRunner)
+ 
+     def test_success(self):
+-        self.mock_runner.run.return_value = ("status info", 0)
++        self.mock_runner.run.return_value = ("status info", "", 0)
+         self.assertEqual(
+             "status info",
+             lib.qdevice_status_cluster_text(self.mock_runner)
+@@ -170,7 +170,7 @@ class QdeviceStatusClusterTest(TestCase):
+         self.mock_runner.run.assert_called_once_with([_qnetd_tool, "-l"])
+ 
+     def test_success_verbose(self):
+-        self.mock_runner.run.return_value = ("status info", 0)
++        self.mock_runner.run.return_value = ("status info", "", 0)
+         self.assertEqual(
+             "status info",
+             lib.qdevice_status_cluster_text(self.mock_runner, verbose=True)
+@@ -178,7 +178,7 @@ class QdeviceStatusClusterTest(TestCase):
+         self.mock_runner.run.assert_called_once_with([_qnetd_tool, "-l", "-v"])
+ 
+     def test_success_cluster(self):
+-        self.mock_runner.run.return_value = ("status info", 0)
++        self.mock_runner.run.return_value = ("status info", "", 0)
+         self.assertEqual(
+             "status info",
+             lib.qdevice_status_cluster_text(self.mock_runner, "cluster")
+@@ -188,7 +188,7 @@ class QdeviceStatusClusterTest(TestCase):
+         ])
+ 
+     def test_success_cluster_verbose(self):
+-        self.mock_runner.run.return_value = ("status info", 0)
++        self.mock_runner.run.return_value = ("status info", "", 0)
+         self.assertEqual(
+             "status info",
+             lib.qdevice_status_cluster_text(self.mock_runner, "cluster", True)
+@@ -198,7 +198,7 @@ class QdeviceStatusClusterTest(TestCase):
+         ])
+ 
+     def test_error(self):
+-        self.mock_runner.run.return_value = ("status error", 1)
++        self.mock_runner.run.return_value = ("some info", "status error", 1)
+         assert_raise_library_error(
+             lambda: lib.qdevice_status_cluster_text(self.mock_runner),
+             (
+@@ -206,13 +206,63 @@ class QdeviceStatusClusterTest(TestCase):
+                 report_codes.QDEVICE_GET_STATUS_ERROR,
+                 {
+                     "model": "net",
+-                    "reason": "status error",
++                    "reason": "status error\nsome info",
+                 }
+             )
+         )
+         self.mock_runner.run.assert_called_once_with([_qnetd_tool, "-l"])
+ 
+ 
++class QdeviceConnectedClustersTest(TestCase):
++    def test_empty_status(self):
++        status = ""
++        self.assertEqual(
++            [],
++            lib.qdevice_connected_clusters(status)
++        )
++
++    def test_one_cluster(self):
++        status = """\
++Cluster "rhel72":
++    Algorithm:          LMS
++    Tie-breaker:        Node with lowest node ID
++    Node ID 2:
++        Client address:         ::ffff:192.168.122.122:59738
++        Configured node list:   1, 2
++        Membership node list:   1, 2
++        Vote:                   ACK (ACK)
++    Node ID 1:
++        Client address:         ::ffff:192.168.122.121:43420
++        Configured node list:   1, 2
++        Membership node list:   1, 2
++        Vote:                   ACK (ACK)
++"""
++        self.assertEqual(
++            ["rhel72"],
++            lib.qdevice_connected_clusters(status)
++        )
++
++    def test_more_clusters(self):
++        status = """\
++Cluster "rhel72":
++Cluster "rhel73":
++"""
++        self.assertEqual(
++            ["rhel72", "rhel73"],
++            lib.qdevice_connected_clusters(status)
++        )
++
++    def test_invalid_status(self):
++        status = """\
++Cluster:
++    Cluster "rhel72":
++"""
++        self.assertEqual(
++            [],
++            lib.qdevice_connected_clusters(status)
++        )
++
++
+ @mock.patch("pcs.lib.corosync.qdevice_net._get_output_certificate")
+ @mock.patch("pcs.lib.corosync.qdevice_net._store_to_tmpfile")
+ class QdeviceSignCertificateRequestTest(CertificateTestCase):
+@@ -222,7 +272,7 @@ class QdeviceSignCertificateRequestTest(CertificateTestCase):
+     )
+     def test_success(self, mock_tmp_store, mock_get_cert):
+         mock_tmp_store.return_value = self.mock_tmpfile
+-        self.mock_runner.run.return_value = ("tool output", 0)
++        self.mock_runner.run.return_value = ("tool output", "", 0)
+         mock_get_cert.return_value = "new certificate".encode("utf-8")
+ 
+         result = lib.qdevice_sign_certificate_request(
+@@ -293,7 +343,7 @@ class QdeviceSignCertificateRequestTest(CertificateTestCase):
+     )
+     def test_sign_error(self, mock_tmp_store, mock_get_cert):
+         mock_tmp_store.return_value = self.mock_tmpfile
+-        self.mock_runner.run.return_value = ("tool output error", 1)
++        self.mock_runner.run.return_value = ("stdout", "tool output error", 1)
+ 
+         assert_raise_library_error(
+             lambda: lib.qdevice_sign_certificate_request(
+@@ -305,7 +355,7 @@ class QdeviceSignCertificateRequestTest(CertificateTestCase):
+                 severity.ERROR,
+                 report_codes.QDEVICE_CERTIFICATE_SIGN_ERROR,
+                 {
+-                    "reason": "tool output error",
++                    "reason": "tool output error\nstdout",
+                 }
+             )
+         )
+@@ -326,7 +376,7 @@ class QdeviceSignCertificateRequestTest(CertificateTestCase):
+     )
+     def test_output_read_error(self, mock_tmp_store, mock_get_cert):
+         mock_tmp_store.return_value = self.mock_tmpfile
+-        self.mock_runner.run.return_value = ("tool output", 0)
++        self.mock_runner.run.return_value = ("tool output", "", 0)
+         mock_get_cert.side_effect = LibraryError
+ 
+         self.assertRaises(
+@@ -399,7 +449,7 @@ class ClientSetupTest(TestCase):
+ 
+     @mock.patch("pcs.lib.corosync.qdevice_net.client_destroy")
+     def test_success(self, mock_destroy):
+-        self.mock_runner.run.return_value = ("tool output", 0)
++        self.mock_runner.run.return_value = ("tool output", "", 0)
+ 
+         lib.client_setup(self.mock_runner, "certificate data".encode("utf-8"))
+ 
+@@ -414,7 +464,7 @@ class ClientSetupTest(TestCase):
+ 
+     @mock.patch("pcs.lib.corosync.qdevice_net.client_destroy")
+     def test_init_error(self, mock_destroy):
+-        self.mock_runner.run.return_value = ("tool output error", 1)
++        self.mock_runner.run.return_value = ("stdout", "tool output error", 1)
+ 
+         assert_raise_library_error(
+             lambda: lib.client_setup(
+@@ -426,7 +476,7 @@ class ClientSetupTest(TestCase):
+                 report_codes.QDEVICE_INITIALIZATION_ERROR,
+                 {
+                     "model": "net",
+-                    "reason": "tool output error",
++                    "reason": "tool output error\nstdout",
+                 }
+             )
+         )
+@@ -448,7 +498,7 @@ class ClientGenerateCertificateRequestTest(CertificateTestCase):
+         lambda: True
+     )
+     def test_success(self, mock_get_cert):
+-        self.mock_runner.run.return_value = ("tool output", 0)
++        self.mock_runner.run.return_value = ("tool output", "", 0)
+         mock_get_cert.return_value = "new certificate".encode("utf-8")
+ 
+         result = lib.client_generate_certificate_request(
+@@ -492,7 +542,7 @@ class ClientGenerateCertificateRequestTest(CertificateTestCase):
+         lambda: True
+     )
+     def test_tool_error(self, mock_get_cert):
+-        self.mock_runner.run.return_value = ("tool output error", 1)
++        self.mock_runner.run.return_value = ("stdout", "tool output error", 1)
+ 
+         assert_raise_library_error(
+             lambda: lib.client_generate_certificate_request(
+@@ -504,7 +554,7 @@ class ClientGenerateCertificateRequestTest(CertificateTestCase):
+                 report_codes.QDEVICE_INITIALIZATION_ERROR,
+                 {
+                     "model": "net",
+-                    "reason": "tool output error",
++                    "reason": "tool output error\nstdout",
+                 }
+             )
+         )
+@@ -523,7 +573,7 @@ class ClientCertRequestToPk12Test(CertificateTestCase):
+     )
+     def test_success(self, mock_tmp_store, mock_get_cert):
+         mock_tmp_store.return_value = self.mock_tmpfile
+-        self.mock_runner.run.return_value = ("tool output", 0)
++        self.mock_runner.run.return_value = ("tool output", "", 0)
+         mock_get_cert.return_value = "new certificate".encode("utf-8")
+ 
+         result = lib.client_cert_request_to_pk12(
+@@ -594,7 +644,7 @@ class ClientCertRequestToPk12Test(CertificateTestCase):
+     )
+     def test_transform_error(self, mock_tmp_store, mock_get_cert):
+         mock_tmp_store.return_value = self.mock_tmpfile
+-        self.mock_runner.run.return_value = ("tool output error", 1)
++        self.mock_runner.run.return_value = ("stdout", "tool output error", 1)
+ 
+         assert_raise_library_error(
+             lambda: lib.client_cert_request_to_pk12(
+@@ -605,7 +655,7 @@ class ClientCertRequestToPk12Test(CertificateTestCase):
+                 severity.ERROR,
+                 report_codes.QDEVICE_CERTIFICATE_IMPORT_ERROR,
+                 {
+-                    "reason": "tool output error",
++                    "reason": "tool output error\nstdout",
+                 }
+             )
+         )
+@@ -625,7 +675,7 @@ class ClientCertRequestToPk12Test(CertificateTestCase):
+     )
+     def test_output_read_error(self, mock_tmp_store, mock_get_cert):
+         mock_tmp_store.return_value = self.mock_tmpfile
+-        self.mock_runner.run.return_value = ("tool output", 0)
++        self.mock_runner.run.return_value = ("tool output", "", 0)
+         mock_get_cert.side_effect = LibraryError
+ 
+         self.assertRaises(
+@@ -657,7 +707,7 @@ class ClientImportCertificateAndKeyTest(CertificateTestCase):
+     )
+     def test_success(self, mock_tmp_store):
+         mock_tmp_store.return_value = self.mock_tmpfile
+-        self.mock_runner.run.return_value = ("tool output", 0)
++        self.mock_runner.run.return_value = ("tool output", "", 0)
+ 
+         lib.client_import_certificate_and_key(
+             self.mock_runner,
+@@ -721,7 +771,7 @@ class ClientImportCertificateAndKeyTest(CertificateTestCase):
+     )
+     def test_import_error(self, mock_tmp_store):
+         mock_tmp_store.return_value = self.mock_tmpfile
+-        self.mock_runner.run.return_value = ("tool output error", 1)
++        self.mock_runner.run.return_value = ("stdout", "tool output error", 1)
+ 
+         assert_raise_library_error(
+             lambda: lib.client_import_certificate_and_key(
+@@ -732,7 +782,7 @@ class ClientImportCertificateAndKeyTest(CertificateTestCase):
+                 severity.ERROR,
+                 report_codes.QDEVICE_CERTIFICATE_IMPORT_ERROR,
+                 {
+-                    "reason": "tool output error",
++                    "reason": "tool output error\nstdout",
+                 }
+             )
+         )
+diff --git a/pcs/test/test_lib_external.py b/pcs/test/test_lib_external.py
+index aafbe85..d37747a 100644
+--- a/pcs/test/test_lib_external.py
++++ b/pcs/test/test_lib_external.py
+@@ -57,19 +57,23 @@ class CommandRunnerTest(TestCase):
+         self.assertEqual(filtered_kwargs, kwargs)
+ 
+     def test_basic(self, mock_popen):
+-        expected_output = "expected output"
++        expected_stdout = "expected stdout"
++        expected_stderr = "expected stderr"
+         expected_retval = 123
+         command = ["a_command"]
+         command_str = "a_command"
+         mock_process = mock.MagicMock(spec_set=["communicate", "returncode"])
+-        mock_process.communicate.return_value = (expected_output, "dummy")
++        mock_process.communicate.return_value = (
++            expected_stdout, expected_stderr
++        )
+         mock_process.returncode = expected_retval
+         mock_popen.return_value = mock_process
+ 
+         runner = lib.CommandRunner(self.mock_logger, self.mock_reporter)
+-        real_output, real_retval = runner.run(command)
++        real_stdout, real_stderr, real_retval = runner.run(command)
+ 
+-        self.assertEqual(real_output, expected_output)
++        self.assertEqual(real_stdout, expected_stdout)
++        self.assertEqual(real_stderr, expected_stderr)
+         self.assertEqual(real_retval, expected_retval)
+         mock_process.communicate.assert_called_once_with(None)
+         self.assert_popen_called_with(
+@@ -82,9 +86,14 @@ class CommandRunnerTest(TestCase):
+             mock.call("""\
+ Finished running: {0}
+ Return value: {1}
+---Debug Output Start--
++--Debug Stdout Start--
+ {2}
+---Debug Output End--""".format(command_str, expected_retval, expected_output))
++--Debug Stdout End--
++--Debug Stderr Start--
++{3}
++--Debug Stderr End--""".format(
++                command_str, expected_retval, expected_stdout, expected_stderr
++            ))
+         ]
+         self.assertEqual(self.mock_logger.debug.call_count, len(logger_calls))
+         self.mock_logger.debug.assert_has_calls(logger_calls)
+@@ -105,19 +114,23 @@ Return value: {1}
+                     {
+                         "command": command_str,
+                         "return_value": expected_retval,
+-                        "stdout": expected_output,
++                        "stdout": expected_stdout,
++                        "stderr": expected_stderr,
+                     }
+                 )
+             ]
+         )
+ 
+     def test_env(self, mock_popen):
+-        expected_output = "expected output"
++        expected_stdout = "expected output"
++        expected_stderr = "expected stderr"
+         expected_retval = 123
+         command = ["a_command"]
+         command_str = "a_command"
+         mock_process = mock.MagicMock(spec_set=["communicate", "returncode"])
+-        mock_process.communicate.return_value = (expected_output, "dummy")
++        mock_process.communicate.return_value = (
++            expected_stdout, expected_stderr
++        )
+         mock_process.returncode = expected_retval
+         mock_popen.return_value = mock_process
+ 
+@@ -126,12 +139,13 @@ Return value: {1}
+             self.mock_reporter,
+             {"a": "a", "b": "b"}
+         )
+-        real_output, real_retval = runner.run(
++        real_stdout, real_stderr, real_retval = runner.run(
+             command,
+             env_extend={"b": "B", "c": "C"}
+         )
+ 
+-        self.assertEqual(real_output, expected_output)
++        self.assertEqual(real_stdout, expected_stdout)
++        self.assertEqual(real_stderr, expected_stderr)
+         self.assertEqual(real_retval, expected_retval)
+         mock_process.communicate.assert_called_once_with(None)
+         self.assert_popen_called_with(
+@@ -144,9 +158,14 @@ Return value: {1}
+             mock.call("""\
+ Finished running: {0}
+ Return value: {1}
+---Debug Output Start--
++--Debug Stdout Start--
+ {2}
+---Debug Output End--""".format(command_str, expected_retval, expected_output))
++--Debug Stdout End--
++--Debug Stderr Start--
++{3}
++--Debug Stderr End--""".format(
++                command_str, expected_retval, expected_stdout, expected_stderr
++            ))
+         ]
+         self.assertEqual(self.mock_logger.debug.call_count, len(logger_calls))
+         self.mock_logger.debug.assert_has_calls(logger_calls)
+@@ -167,27 +186,34 @@ Return value: {1}
+                     {
+                         "command": command_str,
+                         "return_value": expected_retval,
+-                        "stdout": expected_output,
++                        "stdout": expected_stdout,
++                        "stderr": expected_stderr,
+                     }
+                 )
+             ]
+         )
+ 
+     def test_stdin(self, mock_popen):
+-        expected_output = "expected output"
++        expected_stdout = "expected output"
++        expected_stderr = "expected stderr"
+         expected_retval = 123
+         command = ["a_command"]
+         command_str = "a_command"
+         stdin = "stdin string"
+         mock_process = mock.MagicMock(spec_set=["communicate", "returncode"])
+-        mock_process.communicate.return_value = (expected_output, "dummy")
++        mock_process.communicate.return_value = (
++            expected_stdout, expected_stderr
++        )
+         mock_process.returncode = expected_retval
+         mock_popen.return_value = mock_process
+ 
+         runner = lib.CommandRunner(self.mock_logger, self.mock_reporter)
+-        real_output, real_retval = runner.run(command, stdin_string=stdin)
++        real_stdout, real_stderr, real_retval = runner.run(
++            command, stdin_string=stdin
++        )
+ 
+-        self.assertEqual(real_output, expected_output)
++        self.assertEqual(real_stdout, expected_stdout)
++        self.assertEqual(real_stderr, expected_stderr)
+         self.assertEqual(real_retval, expected_retval)
+         mock_process.communicate.assert_called_once_with(stdin)
+         self.assert_popen_called_with(
+@@ -204,9 +230,14 @@ Running: {0}
+             mock.call("""\
+ Finished running: {0}
+ Return value: {1}
+---Debug Output Start--
++--Debug Stdout Start--
+ {2}
+---Debug Output End--""".format(command_str, expected_retval, expected_output))
++--Debug Stdout End--
++--Debug Stderr Start--
++{3}
++--Debug Stderr End--""".format(
++                command_str, expected_retval, expected_stdout, expected_stderr
++            ))
+         ]
+         self.assertEqual(self.mock_logger.debug.call_count, len(logger_calls))
+         self.mock_logger.debug.assert_has_calls(logger_calls)
+@@ -227,7 +258,8 @@ Return value: {1}
+                     {
+                         "command": command_str,
+                         "return_value": expected_retval,
+-                        "stdout": expected_output,
++                        "stdout": expected_stdout,
++                        "stderr": expected_stderr,
+                     }
+                 )
+             ]
+@@ -957,7 +989,7 @@ class ParallelCommunicationHelperTest(TestCase):
+ class IsCmanClusterTest(TestCase):
+     def template_test(self, is_cman, corosync_output, corosync_retval=0):
+         mock_runner = mock.MagicMock(spec_set=lib.CommandRunner)
+-        mock_runner.run.return_value = (corosync_output, corosync_retval)
++        mock_runner.run.return_value = (corosync_output, "", corosync_retval)
+         self.assertEqual(is_cman, lib.is_cman_cluster(mock_runner))
+         mock_runner.run.assert_called_once_with([
+             os.path.join(settings.corosync_binaries, "corosync"),
+@@ -1021,7 +1053,7 @@ class DisableServiceTest(TestCase):
+     def test_systemctl(self, mock_is_installed, mock_systemctl):
+         mock_is_installed.return_value = True
+         mock_systemctl.return_value = True
+-        self.mock_runner.run.return_value = ("", 0)
++        self.mock_runner.run.return_value = ("", "Removed symlink", 0)
+         lib.disable_service(self.mock_runner, self.service)
+         self.mock_runner.run.assert_called_once_with(
+             ["systemctl", "disable", self.service + ".service"]
+@@ -1030,7 +1062,7 @@ class DisableServiceTest(TestCase):
+     def test_systemctl_failed(self, mock_is_installed, mock_systemctl):
+         mock_is_installed.return_value = True
+         mock_systemctl.return_value = True
+-        self.mock_runner.run.return_value = ("", 1)
++        self.mock_runner.run.return_value = ("", "Failed", 1)
+         self.assertRaises(
+             lib.DisableServiceError,
+             lambda: lib.disable_service(self.mock_runner, self.service)
+@@ -1042,7 +1074,7 @@ class DisableServiceTest(TestCase):
+     def test_not_systemctl(self, mock_is_installed, mock_systemctl):
+         mock_is_installed.return_value = True
+         mock_systemctl.return_value = False
+-        self.mock_runner.run.return_value = ("", 0)
++        self.mock_runner.run.return_value = ("", "", 0)
+         lib.disable_service(self.mock_runner, self.service)
+         self.mock_runner.run.assert_called_once_with(
+             ["chkconfig", self.service, "off"]
+@@ -1051,7 +1083,7 @@ class DisableServiceTest(TestCase):
+     def test_not_systemctl_failed(self, mock_is_installed, mock_systemctl):
+         mock_is_installed.return_value = True
+         mock_systemctl.return_value = False
+-        self.mock_runner.run.return_value = ("", 1)
++        self.mock_runner.run.return_value = ("", "error", 1)
+         self.assertRaises(
+             lib.DisableServiceError,
+             lambda: lib.disable_service(self.mock_runner, self.service)
+@@ -1079,7 +1111,7 @@ class DisableServiceTest(TestCase):
+     def test_instance_systemctl(self, mock_is_installed, mock_systemctl):
+         mock_is_installed.return_value = True
+         mock_systemctl.return_value = True
+-        self.mock_runner.run.return_value = ("", 0)
++        self.mock_runner.run.return_value = ("", "Removed symlink", 0)
+         lib.disable_service(self.mock_runner, self.service, instance="test")
+         self.mock_runner.run.assert_called_once_with([
+             "systemctl",
+@@ -1090,7 +1122,7 @@ class DisableServiceTest(TestCase):
+     def test_instance_not_systemctl(self, mock_is_installed, mock_systemctl):
+         mock_is_installed.return_value = True
+         mock_systemctl.return_value = False
+-        self.mock_runner.run.return_value = ("", 0)
++        self.mock_runner.run.return_value = ("", "", 0)
+         lib.disable_service(self.mock_runner, self.service, instance="test")
+         self.mock_runner.run.assert_called_once_with(
+             ["chkconfig", self.service, "off"]
+@@ -1104,7 +1136,7 @@ class EnableServiceTest(TestCase):
+ 
+     def test_systemctl(self, mock_systemctl):
+         mock_systemctl.return_value = True
+-        self.mock_runner.run.return_value = ("", 0)
++        self.mock_runner.run.return_value = ("", "Created symlink", 0)
+         lib.enable_service(self.mock_runner, self.service)
+         self.mock_runner.run.assert_called_once_with(
+             ["systemctl", "enable", self.service + ".service"]
+@@ -1112,7 +1144,7 @@ class EnableServiceTest(TestCase):
+ 
+     def test_systemctl_failed(self, mock_systemctl):
+         mock_systemctl.return_value = True
+-        self.mock_runner.run.return_value = ("", 1)
++        self.mock_runner.run.return_value = ("", "Failed", 1)
+         self.assertRaises(
+             lib.EnableServiceError,
+             lambda: lib.enable_service(self.mock_runner, self.service)
+@@ -1123,7 +1155,7 @@ class EnableServiceTest(TestCase):
+ 
+     def test_not_systemctl(self, mock_systemctl):
+         mock_systemctl.return_value = False
+-        self.mock_runner.run.return_value = ("", 0)
++        self.mock_runner.run.return_value = ("", "", 0)
+         lib.enable_service(self.mock_runner, self.service)
+         self.mock_runner.run.assert_called_once_with(
+             ["chkconfig", self.service, "on"]
+@@ -1131,7 +1163,7 @@ class EnableServiceTest(TestCase):
+ 
+     def test_not_systemctl_failed(self, mock_systemctl):
+         mock_systemctl.return_value = False
+-        self.mock_runner.run.return_value = ("", 1)
++        self.mock_runner.run.return_value = ("", "error", 1)
+         self.assertRaises(
+             lib.EnableServiceError,
+             lambda: lib.enable_service(self.mock_runner, self.service)
+@@ -1142,7 +1174,7 @@ class EnableServiceTest(TestCase):
+ 
+     def test_instance_systemctl(self, mock_systemctl):
+         mock_systemctl.return_value = True
+-        self.mock_runner.run.return_value = ("", 0)
++        self.mock_runner.run.return_value = ("", "Created symlink", 0)
+         lib.enable_service(self.mock_runner, self.service, instance="test")
+         self.mock_runner.run.assert_called_once_with([
+             "systemctl",
+@@ -1152,7 +1184,7 @@ class EnableServiceTest(TestCase):
+ 
+     def test_instance_not_systemctl(self, mock_systemctl):
+         mock_systemctl.return_value = False
+-        self.mock_runner.run.return_value = ("", 0)
++        self.mock_runner.run.return_value = ("", "", 0)
+         lib.enable_service(self.mock_runner, self.service, instance="test")
+         self.mock_runner.run.assert_called_once_with(
+             ["chkconfig", self.service, "on"]
+@@ -1167,7 +1199,7 @@ class StartServiceTest(TestCase):
+ 
+     def test_systemctl(self, mock_systemctl):
+         mock_systemctl.return_value = True
+-        self.mock_runner.run.return_value = ("", 0)
++        self.mock_runner.run.return_value = ("", "", 0)
+         lib.start_service(self.mock_runner, self.service)
+         self.mock_runner.run.assert_called_once_with(
+             ["systemctl", "start", self.service + ".service"]
+@@ -1175,7 +1207,7 @@ class StartServiceTest(TestCase):
+ 
+     def test_systemctl_failed(self, mock_systemctl):
+         mock_systemctl.return_value = True
+-        self.mock_runner.run.return_value = ("", 1)
++        self.mock_runner.run.return_value = ("", "Failed", 1)
+         self.assertRaises(
+             lib.StartServiceError,
+             lambda: lib.start_service(self.mock_runner, self.service)
+@@ -1186,7 +1218,7 @@ class StartServiceTest(TestCase):
+ 
+     def test_not_systemctl(self, mock_systemctl):
+         mock_systemctl.return_value = False
+-        self.mock_runner.run.return_value = ("", 0)
++        self.mock_runner.run.return_value = ("Starting...", "", 0)
+         lib.start_service(self.mock_runner, self.service)
+         self.mock_runner.run.assert_called_once_with(
+             ["service", self.service, "start"]
+@@ -1194,7 +1226,7 @@ class StartServiceTest(TestCase):
+ 
+     def test_not_systemctl_failed(self, mock_systemctl):
+         mock_systemctl.return_value = False
+-        self.mock_runner.run.return_value = ("", 1)
++        self.mock_runner.run.return_value = ("", "unrecognized", 1)
+         self.assertRaises(
+             lib.StartServiceError,
+             lambda: lib.start_service(self.mock_runner, self.service)
+@@ -1205,7 +1237,7 @@ class StartServiceTest(TestCase):
+ 
+     def test_instance_systemctl(self, mock_systemctl):
+         mock_systemctl.return_value = True
+-        self.mock_runner.run.return_value = ("", 0)
++        self.mock_runner.run.return_value = ("", "", 0)
+         lib.start_service(self.mock_runner, self.service, instance="test")
+         self.mock_runner.run.assert_called_once_with([
+             "systemctl", "start", "{0}@{1}.service".format(self.service, "test")
+@@ -1213,7 +1245,7 @@ class StartServiceTest(TestCase):
+ 
+     def test_instance_not_systemctl(self, mock_systemctl):
+         mock_systemctl.return_value = False
+-        self.mock_runner.run.return_value = ("", 0)
++        self.mock_runner.run.return_value = ("Starting...", "", 0)
+         lib.start_service(self.mock_runner, self.service, instance="test")
+         self.mock_runner.run.assert_called_once_with(
+             ["service", self.service, "start"]
+@@ -1228,7 +1260,7 @@ class StopServiceTest(TestCase):
+ 
+     def test_systemctl(self, mock_systemctl):
+         mock_systemctl.return_value = True
+-        self.mock_runner.run.return_value = ("", 0)
++        self.mock_runner.run.return_value = ("", "", 0)
+         lib.stop_service(self.mock_runner, self.service)
+         self.mock_runner.run.assert_called_once_with(
+             ["systemctl", "stop", self.service + ".service"]
+@@ -1236,7 +1268,7 @@ class StopServiceTest(TestCase):
+ 
+     def test_systemctl_failed(self, mock_systemctl):
+         mock_systemctl.return_value = True
+-        self.mock_runner.run.return_value = ("", 1)
++        self.mock_runner.run.return_value = ("", "Failed", 1)
+         self.assertRaises(
+             lib.StopServiceError,
+             lambda: lib.stop_service(self.mock_runner, self.service)
+@@ -1247,7 +1279,7 @@ class StopServiceTest(TestCase):
+ 
+     def test_not_systemctl(self, mock_systemctl):
+         mock_systemctl.return_value = False
+-        self.mock_runner.run.return_value = ("", 0)
++        self.mock_runner.run.return_value = ("Stopping...", "", 0)
+         lib.stop_service(self.mock_runner, self.service)
+         self.mock_runner.run.assert_called_once_with(
+             ["service", self.service, "stop"]
+@@ -1255,7 +1287,7 @@ class StopServiceTest(TestCase):
+ 
+     def test_not_systemctl_failed(self, mock_systemctl):
+         mock_systemctl.return_value = False
+-        self.mock_runner.run.return_value = ("", 1)
++        self.mock_runner.run.return_value = ("", "unrecognized", 1)
+         self.assertRaises(
+             lib.StopServiceError,
+             lambda: lib.stop_service(self.mock_runner, self.service)
+@@ -1266,7 +1298,7 @@ class StopServiceTest(TestCase):
+ 
+     def test_instance_systemctl(self, mock_systemctl):
+         mock_systemctl.return_value = True
+-        self.mock_runner.run.return_value = ("", 0)
++        self.mock_runner.run.return_value = ("", "", 0)
+         lib.stop_service(self.mock_runner, self.service, instance="test")
+         self.mock_runner.run.assert_called_once_with([
+             "systemctl", "stop", "{0}@{1}.service".format(self.service, "test")
+@@ -1274,7 +1306,7 @@ class StopServiceTest(TestCase):
+ 
+     def test_instance_not_systemctl(self, mock_systemctl):
+         mock_systemctl.return_value = False
+-        self.mock_runner.run.return_value = ("", 0)
++        self.mock_runner.run.return_value = ("Stopping...", "", 0)
+         lib.stop_service(self.mock_runner, self.service, instance="test")
+         self.mock_runner.run.assert_called_once_with(
+             ["service", self.service, "stop"]
+@@ -1287,14 +1319,14 @@ class KillServicesTest(TestCase):
+         self.services = ["service1", "service2"]
+ 
+     def test_success(self):
+-        self.mock_runner.run.return_value = ("", 0)
++        self.mock_runner.run.return_value = ("", "", 0)
+         lib.kill_services(self.mock_runner, self.services)
+         self.mock_runner.run.assert_called_once_with(
+             ["killall", "--quiet", "--signal", "9", "--"] + self.services
+         )
+ 
+     def test_failed(self):
+-        self.mock_runner.run.return_value = ("error", 1)
++        self.mock_runner.run.return_value = ("", "error", 1)
+         self.assertRaises(
+             lib.KillServicesError,
+             lambda: lib.kill_services(self.mock_runner, self.services)
+@@ -1304,7 +1336,7 @@ class KillServicesTest(TestCase):
+         )
+ 
+     def test_service_not_running(self):
+-        self.mock_runner.run.return_value = ("", 1)
++        self.mock_runner.run.return_value = ("", "", 1)
+         lib.kill_services(self.mock_runner, self.services)
+         self.mock_runner.run.assert_called_once_with(
+             ["killall", "--quiet", "--signal", "9", "--"] + self.services
+@@ -1348,7 +1380,7 @@ class IsServiceEnabledTest(TestCase):
+ 
+     def test_systemctl_enabled(self, mock_systemctl):
+         mock_systemctl.return_value = True
+-        self.mock_runner.run.return_value = ("enabled\n", 0)
++        self.mock_runner.run.return_value = ("enabled\n", "", 0)
+         self.assertTrue(lib.is_service_enabled(self.mock_runner, self.service))
+         self.mock_runner.run.assert_called_once_with(
+             ["systemctl", "is-enabled", self.service + ".service"]
+@@ -1356,7 +1388,7 @@ class IsServiceEnabledTest(TestCase):
+ 
+     def test_systemctl_disabled(self, mock_systemctl):
+         mock_systemctl.return_value = True
+-        self.mock_runner.run.return_value = ("disabled\n", 2)
++        self.mock_runner.run.return_value = ("disabled\n", "", 2)
+         self.assertFalse(lib.is_service_enabled(self.mock_runner, self.service))
+         self.mock_runner.run.assert_called_once_with(
+             ["systemctl", "is-enabled", self.service + ".service"]
+@@ -1364,7 +1396,7 @@ class IsServiceEnabledTest(TestCase):
+ 
+     def test_not_systemctl_enabled(self, mock_systemctl):
+         mock_systemctl.return_value = False
+-        self.mock_runner.run.return_value = ("", 0)
++        self.mock_runner.run.return_value = ("", "", 0)
+         self.assertTrue(lib.is_service_enabled(self.mock_runner, self.service))
+         self.mock_runner.run.assert_called_once_with(
+             ["chkconfig", self.service]
+@@ -1372,7 +1404,7 @@ class IsServiceEnabledTest(TestCase):
+ 
+     def test_not_systemctl_disabled(self, mock_systemctl):
+         mock_systemctl.return_value = False
+-        self.mock_runner.run.return_value = ("", 3)
++        self.mock_runner.run.return_value = ("", "", 3)
+         self.assertFalse(lib.is_service_enabled(self.mock_runner, self.service))
+         self.mock_runner.run.assert_called_once_with(
+             ["chkconfig", self.service]
+@@ -1387,7 +1419,7 @@ class IsServiceRunningTest(TestCase):
+ 
+     def test_systemctl_running(self, mock_systemctl):
+         mock_systemctl.return_value = True
+-        self.mock_runner.run.return_value = ("", 0)
++        self.mock_runner.run.return_value = ("active", "", 0)
+         self.assertTrue(lib.is_service_running(self.mock_runner, self.service))
+         self.mock_runner.run.assert_called_once_with(
+             ["systemctl", "is-active", self.service + ".service"]
+@@ -1395,7 +1427,7 @@ class IsServiceRunningTest(TestCase):
+ 
+     def test_systemctl_not_running(self, mock_systemctl):
+         mock_systemctl.return_value = True
+-        self.mock_runner.run.return_value = ("", 2)
++        self.mock_runner.run.return_value = ("inactive", "", 2)
+         self.assertFalse(lib.is_service_running(self.mock_runner, self.service))
+         self.mock_runner.run.assert_called_once_with(
+             ["systemctl", "is-active", self.service + ".service"]
+@@ -1403,7 +1435,7 @@ class IsServiceRunningTest(TestCase):
+ 
+     def test_not_systemctl_running(self, mock_systemctl):
+         mock_systemctl.return_value = False
+-        self.mock_runner.run.return_value = ("", 0)
++        self.mock_runner.run.return_value = ("is running", "", 0)
+         self.assertTrue(lib.is_service_running(self.mock_runner, self.service))
+         self.mock_runner.run.assert_called_once_with(
+             ["service", self.service, "status"]
+@@ -1411,7 +1443,7 @@ class IsServiceRunningTest(TestCase):
+ 
+     def test_not_systemctl_not_running(self, mock_systemctl):
+         mock_systemctl.return_value = False
+-        self.mock_runner.run.return_value = ("", 3)
++        self.mock_runner.run.return_value = ("is stopped", "", 3)
+         self.assertFalse(lib.is_service_running(self.mock_runner, self.service))
+         self.mock_runner.run.assert_called_once_with(
+             ["service", self.service, "status"]
+@@ -1484,7 +1516,7 @@ sbd.service                                 enabled
+ pacemaker.service                           enabled
+ 
+ 3 unit files listed.
+-""", 0)
++""", "", 0)
+         self.assertEqual(
+             lib.get_systemd_services(self.mock_runner),
+             ["pcsd", "sbd", "pacemaker"]
+@@ -1496,7 +1528,7 @@ pacemaker.service                           enabled
+ 
+     def test_failed(self, mock_is_systemctl):
+         mock_is_systemctl.return_value = True
+-        self.mock_runner.run.return_value = ("failed", 1)
++        self.mock_runner.run.return_value = ("stdout", "failed", 1)
+         self.assertEqual(lib.get_systemd_services(self.mock_runner), [])
+         self.assertEqual(mock_is_systemctl.call_count, 1)
+         self.mock_runner.run.assert_called_once_with(
+@@ -1505,10 +1537,9 @@ pacemaker.service                           enabled
+ 
+     def test_not_systemd(self, mock_is_systemctl):
+         mock_is_systemctl.return_value = False
+-        self.mock_runner.run.return_value = ("", 0)
+         self.assertEqual(lib.get_systemd_services(self.mock_runner), [])
+-        self.assertEqual(mock_is_systemctl.call_count, 1)
+-        self.assertEqual(self.mock_runner.call_count, 0)
++        mock_is_systemctl.assert_called_once_with()
++        self.mock_runner.assert_not_called()
+ 
+ 
+ @mock.patch("pcs.lib.external.is_systemctl")
+@@ -1522,24 +1553,20 @@ class GetNonSystemdServicesTest(TestCase):
+ pcsd           	0:off	1:off	2:on	3:on	4:on	5:on	6:off
+ sbd            	0:off	1:on	2:on	3:on	4:on	5:on	6:off
+ pacemaker      	0:off	1:off	2:off	3:off	4:off	5:off	6:off
+-""", 0)
++""", "", 0)
+         self.assertEqual(
+             lib.get_non_systemd_services(self.mock_runner),
+             ["pcsd", "sbd", "pacemaker"]
+         )
+         self.assertEqual(mock_is_systemctl.call_count, 1)
+-        self.mock_runner.run.assert_called_once_with(
+-            ["chkconfig"], ignore_stderr=True
+-        )
++        self.mock_runner.run.assert_called_once_with(["chkconfig"])
+ 
+     def test_failed(self, mock_is_systemctl):
+         mock_is_systemctl.return_value = False
+-        self.mock_runner.run.return_value = ("failed", 1)
++        self.mock_runner.run.return_value = ("stdout", "failed", 1)
+         self.assertEqual(lib.get_non_systemd_services(self.mock_runner), [])
+         self.assertEqual(mock_is_systemctl.call_count, 1)
+-        self.mock_runner.run.assert_called_once_with(
+-            ["chkconfig"], ignore_stderr=True
+-        )
++        self.mock_runner.run.assert_called_once_with(["chkconfig"])
+ 
+     def test_systemd(self, mock_is_systemctl):
+         mock_is_systemctl.return_value = True
+diff --git a/pcs/test/test_lib_pacemaker.py b/pcs/test/test_lib_pacemaker.py
+index c475db6..7ca7b77 100644
+--- a/pcs/test/test_lib_pacemaker.py
++++ b/pcs/test/test_lib_pacemaker.py
+@@ -64,21 +64,31 @@ class LibraryPacemakerNodeStatusTest(LibraryPacemakerTest):
+ 
+ class GetClusterStatusXmlTest(LibraryPacemakerTest):
+     def test_success(self):
+-        expected_xml = "<xml />"
++        expected_stdout = "<xml />"
++        expected_stderr = ""
+         expected_retval = 0
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (expected_xml, expected_retval)
++        mock_runner.run.return_value = (
++            expected_stdout,
++            expected_stderr,
++            expected_retval
++        )
+ 
+         real_xml = lib.get_cluster_status_xml(mock_runner)
+ 
+         mock_runner.run.assert_called_once_with(self.crm_mon_cmd())
+-        self.assertEqual(expected_xml, real_xml)
++        self.assertEqual(expected_stdout, real_xml)
+ 
+     def test_error(self):
+-        expected_error = "some error"
++        expected_stdout = "some info"
++        expected_stderr = "some error"
+         expected_retval = 1
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (expected_error, expected_retval)
++        mock_runner.run.return_value = (
++            expected_stdout,
++            expected_stderr,
++            expected_retval
++        )
+ 
+         assert_raise_library_error(
+             lambda: lib.get_cluster_status_xml(mock_runner),
+@@ -86,8 +96,7 @@ class GetClusterStatusXmlTest(LibraryPacemakerTest):
+                 Severity.ERROR,
+                 report_codes.CRM_MON_ERROR,
+                 {
+-                    "return_value": expected_retval,
+-                    "stdout": expected_error,
++                    "reason": expected_stderr + "\n" + expected_stdout,
+                 }
+             )
+         )
+@@ -96,23 +105,33 @@ class GetClusterStatusXmlTest(LibraryPacemakerTest):
+ 
+ class GetCibXmlTest(LibraryPacemakerTest):
+     def test_success(self):
+-        expected_xml = "<xml />"
++        expected_stdout = "<xml />"
++        expected_stderr = ""
+         expected_retval = 0
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (expected_xml, expected_retval)
++        mock_runner.run.return_value = (
++            expected_stdout,
++            expected_stderr,
++            expected_retval
++        )
+ 
+         real_xml = lib.get_cib_xml(mock_runner)
+ 
+         mock_runner.run.assert_called_once_with(
+             [self.path("cibadmin"), "--local", "--query"]
+         )
+-        self.assertEqual(expected_xml, real_xml)
++        self.assertEqual(expected_stdout, real_xml)
+ 
+     def test_error(self):
+-        expected_error = "some error"
++        expected_stdout = "some info"
++        expected_stderr = "some error"
+         expected_retval = 1
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (expected_error, expected_retval)
++        mock_runner.run.return_value = (
++            expected_stdout,
++            expected_stderr,
++            expected_retval
++        )
+ 
+         assert_raise_library_error(
+             lambda: lib.get_cib_xml(mock_runner),
+@@ -120,8 +139,7 @@ class GetCibXmlTest(LibraryPacemakerTest):
+                 Severity.ERROR,
+                 report_codes.CIB_LOAD_ERROR,
+                 {
+-                    "return_value": expected_retval,
+-                    "stdout": expected_error,
++                    "reason": expected_stderr + "\n" + expected_stdout,
+                 }
+             )
+         )
+@@ -131,11 +149,16 @@ class GetCibXmlTest(LibraryPacemakerTest):
+         )
+ 
+     def test_success_scope(self):
+-        expected_xml = "<xml />"
++        expected_stdout = "<xml />"
++        expected_stderr = ""
+         expected_retval = 0
+         scope = "test_scope"
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (expected_xml, expected_retval)
++        mock_runner.run.return_value = (
++            expected_stdout,
++            expected_stderr,
++            expected_retval
++        )
+ 
+         real_xml = lib.get_cib_xml(mock_runner, scope)
+ 
+@@ -145,14 +168,19 @@ class GetCibXmlTest(LibraryPacemakerTest):
+                 "--local", "--query", "--scope={0}".format(scope)
+             ]
+         )
+-        self.assertEqual(expected_xml, real_xml)
++        self.assertEqual(expected_stdout, real_xml)
+ 
+     def test_scope_error(self):
+-        expected_error = "some error"
++        expected_stdout = "some info"
++        expected_stderr = "some error"
+         expected_retval = 6
+         scope = "test_scope"
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (expected_error, expected_retval)
++        mock_runner.run.return_value = (
++            expected_stdout,
++            expected_stderr,
++            expected_retval
++        )
+ 
+         assert_raise_library_error(
+             lambda: lib.get_cib_xml(mock_runner, scope=scope),
+@@ -161,8 +189,7 @@ class GetCibXmlTest(LibraryPacemakerTest):
+                 report_codes.CIB_LOAD_ERROR_SCOPE_MISSING,
+                 {
+                     "scope": scope,
+-                    "return_value": expected_retval,
+-                    "stdout": expected_error,
++                    "reason": expected_stderr + "\n" + expected_stdout,
+                 }
+             )
+         )
+@@ -194,10 +221,15 @@ class GetCibTest(LibraryPacemakerTest):
+ class ReplaceCibConfigurationTest(LibraryPacemakerTest):
+     def test_success(self):
+         xml = "<xml/>"
+-        expected_output = "expected output"
++        expected_stdout = "expected output"
++        expected_stderr = ""
+         expected_retval = 0
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (expected_output, expected_retval)
++        mock_runner.run.return_value = (
++            expected_stdout,
++            expected_stderr,
++            expected_retval
++        )
+ 
+         lib.replace_cib_configuration(
+             mock_runner,
+@@ -214,10 +246,15 @@ class ReplaceCibConfigurationTest(LibraryPacemakerTest):
+ 
+     def test_cib_upgraded(self):
+         xml = "<xml/>"
+-        expected_output = "expected output"
++        expected_stdout = "expected output"
++        expected_stderr = ""
+         expected_retval = 0
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (expected_output, expected_retval)
++        mock_runner.run.return_value = (
++            expected_stdout,
++            expected_stderr,
++            expected_retval
++        )
+ 
+         lib.replace_cib_configuration(
+             mock_runner, XmlManipulation.from_str(xml).tree, True
+@@ -230,10 +267,15 @@ class ReplaceCibConfigurationTest(LibraryPacemakerTest):
+ 
+     def test_error(self):
+         xml = "<xml/>"
+-        expected_error = "expected error"
++        expected_stdout = "expected output"
++        expected_stderr = "expected stderr"
+         expected_retval = 1
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (expected_error, expected_retval)
++        mock_runner.run.return_value = (
++            expected_stdout,
++            expected_stderr,
++            expected_retval
++        )
+ 
+         assert_raise_library_error(
+             lambda: lib.replace_cib_configuration(
+@@ -245,8 +287,8 @@ class ReplaceCibConfigurationTest(LibraryPacemakerTest):
+                 Severity.ERROR,
+                 report_codes.CIB_PUSH_ERROR,
+                 {
+-                    "return_value": expected_retval,
+-                    "stdout": expected_error,
++                    "reason": expected_stderr,
++                    "pushed_cib": expected_stdout,
+                 }
+             )
+         )
+@@ -261,10 +303,15 @@ class ReplaceCibConfigurationTest(LibraryPacemakerTest):
+ 
+ class GetLocalNodeStatusTest(LibraryPacemakerNodeStatusTest):
+     def test_offline(self):
+-        expected_error = "some error"
++        expected_stdout = "some info"
++        expected_stderr = "some error"
+         expected_retval = 1
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (expected_error, expected_retval)
++        mock_runner.run.return_value = (
++            expected_stdout,
++            expected_stderr,
++            expected_retval
++        )
+ 
+         self.assertEqual(
+             {"offline": True},
+@@ -273,10 +320,15 @@ class GetLocalNodeStatusTest(LibraryPacemakerNodeStatusTest):
+         mock_runner.run.assert_called_once_with(self.crm_mon_cmd())
+ 
+     def test_invalid_status(self):
+-        expected_xml = "some error"
++        expected_stdout = "invalid xml"
++        expected_stderr = ""
+         expected_retval = 0
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (expected_xml, expected_retval)
++        mock_runner.run.return_value = (
++            expected_stdout,
++            expected_stderr,
++            expected_retval
++        )
+ 
+         assert_raise_library_error(
+             lambda: lib.get_local_node_status(mock_runner),
+@@ -310,9 +362,9 @@ class GetLocalNodeStatusTest(LibraryPacemakerNodeStatusTest):
+             ),
+         ]
+         return_value_list = [
+-            (str(self.status), 0),
+-            (node_id, 0),
+-            (node_name, 0)
++            (str(self.status), "", 0),
++            (node_id, "", 0),
++            (node_name, "", 0)
+         ]
+         mock_runner.run.side_effect = return_value_list
+ 
+@@ -339,9 +391,9 @@ class GetLocalNodeStatusTest(LibraryPacemakerNodeStatusTest):
+             ),
+         ]
+         return_value_list = [
+-            (str(self.status), 0),
+-            (node_id, 0),
+-            (node_name_bad, 0)
++            (str(self.status), "", 0),
++            (node_id, "", 0),
++            (node_name_bad, "", 0)
+         ]
+         mock_runner.run.side_effect = return_value_list
+ 
+@@ -370,8 +422,8 @@ class GetLocalNodeStatusTest(LibraryPacemakerNodeStatusTest):
+             mock.call([self.path("crm_node"), "--cluster-id"]),
+         ]
+         return_value_list = [
+-            (str(self.status), 0),
+-            ("some error", 1),
++            (str(self.status), "", 0),
++            ("", "some error", 1),
+         ]
+         mock_runner.run.side_effect = return_value_list
+ 
+@@ -403,9 +455,9 @@ class GetLocalNodeStatusTest(LibraryPacemakerNodeStatusTest):
+             ),
+         ]
+         return_value_list = [
+-            (str(self.status), 0),
+-            (node_id, 0),
+-            ("some error", 1),
++            (str(self.status), "", 0),
++            (node_id, "", 0),
++            ("", "some error", 1),
+         ]
+         mock_runner.run.side_effect = return_value_list
+ 
+@@ -437,9 +489,9 @@ class GetLocalNodeStatusTest(LibraryPacemakerNodeStatusTest):
+             ),
+         ]
+         return_value_list = [
+-            (str(self.status), 0),
+-            (node_id, 0),
+-            ("(null)", 0),
++            (str(self.status), "", 0),
++            (node_id, "", 0),
++            ("(null)", "", 0),
+         ]
+         mock_runner.run.side_effect = return_value_list
+ 
+@@ -465,15 +517,16 @@ class ResourceCleanupTest(LibraryPacemakerTest):
+         return str(XmlManipulation(doc))
+ 
+     def test_basic(self):
+-        expected_output = "expected output"
++        expected_stdout = "expected output"
++        expected_stderr = "expected stderr"
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+         call_list = [
+             mock.call(self.crm_mon_cmd()),
+             mock.call([self.path("crm_resource"), "--cleanup"]),
+         ]
+         return_value_list = [
+-            (self.fixture_status_xml(1, 1), 0),
+-            (expected_output, 0),
++            (self.fixture_status_xml(1, 1), "", 0),
++            (expected_stdout, expected_stderr, 0),
+         ]
+         mock_runner.run.side_effect = return_value_list
+ 
+@@ -482,11 +535,18 @@ class ResourceCleanupTest(LibraryPacemakerTest):
+         self.assertEqual(len(return_value_list), len(call_list))
+         self.assertEqual(len(return_value_list), mock_runner.run.call_count)
+         mock_runner.run.assert_has_calls(call_list)
+-        self.assertEqual(expected_output, real_output)
++        self.assertEqual(
++            expected_stdout + "\n" + expected_stderr,
++            real_output
++        )
+ 
+     def test_threshold_exceeded(self):
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (self.fixture_status_xml(1000, 1000), 0)
++        mock_runner.run.return_value = (
++            self.fixture_status_xml(1000, 1000),
++            "",
++            0
++        )
+ 
+         assert_raise_library_error(
+             lambda: lib.resource_cleanup(mock_runner),
+@@ -501,49 +561,62 @@ class ResourceCleanupTest(LibraryPacemakerTest):
+         mock_runner.run.assert_called_once_with(self.crm_mon_cmd())
+ 
+     def test_forced(self):
+-        expected_output = "expected output"
++        expected_stdout = "expected output"
++        expected_stderr = "expected stderr"
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (expected_output, 0)
++        mock_runner.run.return_value = (expected_stdout, expected_stderr, 0)
+ 
+         real_output = lib.resource_cleanup(mock_runner, force=True)
+ 
+         mock_runner.run.assert_called_once_with(
+             [self.path("crm_resource"), "--cleanup"]
+         )
+-        self.assertEqual(expected_output, real_output)
++        self.assertEqual(
++            expected_stdout + "\n" + expected_stderr,
++            real_output
++        )
+ 
+     def test_resource(self):
+         resource = "test_resource"
+-        expected_output = "expected output"
++        expected_stdout = "expected output"
++        expected_stderr = "expected stderr"
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (expected_output, 0)
++        mock_runner.run.return_value = (expected_stdout, expected_stderr, 0)
+ 
+         real_output = lib.resource_cleanup(mock_runner, resource=resource)
+ 
+         mock_runner.run.assert_called_once_with(
+             [self.path("crm_resource"), "--cleanup", "--resource", resource]
+         )
+-        self.assertEqual(expected_output, real_output)
++        self.assertEqual(
++            expected_stdout + "\n" + expected_stderr,
++            real_output
++        )
+ 
+     def test_node(self):
+         node = "test_node"
+-        expected_output = "expected output"
++        expected_stdout = "expected output"
++        expected_stderr = "expected stderr"
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (expected_output, 0)
++        mock_runner.run.return_value = (expected_stdout, expected_stderr, 0)
+ 
+         real_output = lib.resource_cleanup(mock_runner, node=node)
+ 
+         mock_runner.run.assert_called_once_with(
+             [self.path("crm_resource"), "--cleanup", "--node", node]
+         )
+-        self.assertEqual(expected_output, real_output)
++        self.assertEqual(
++            expected_stdout + "\n" + expected_stderr,
++            real_output
++        )
+ 
+     def test_node_and_resource(self):
+         node = "test_node"
+         resource = "test_resource"
+-        expected_output = "expected output"
++        expected_stdout = "expected output"
++        expected_stderr = "expected stderr"
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (expected_output, 0)
++        mock_runner.run.return_value = (expected_stdout, expected_stderr, 0)
+ 
+         real_output = lib.resource_cleanup(
+             mock_runner, resource=resource, node=node
+@@ -555,13 +628,21 @@ class ResourceCleanupTest(LibraryPacemakerTest):
+                 "--cleanup", "--resource", resource, "--node", node
+             ]
+         )
+-        self.assertEqual(expected_output, real_output)
++        self.assertEqual(
++            expected_stdout + "\n" + expected_stderr,
++            real_output
++        )
+ 
+     def test_error_state(self):
+-        expected_error = "some error"
++        expected_stdout = "some info"
++        expected_stderr = "some error"
+         expected_retval = 1
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (expected_error, expected_retval)
++        mock_runner.run.return_value = (
++            expected_stdout,
++            expected_stderr,
++            expected_retval
++        )
+ 
+         assert_raise_library_error(
+             lambda: lib.resource_cleanup(mock_runner),
+@@ -569,8 +650,7 @@ class ResourceCleanupTest(LibraryPacemakerTest):
+                 Severity.ERROR,
+                 report_codes.CRM_MON_ERROR,
+                 {
+-                    "return_value": expected_retval,
+-                    "stdout": expected_error,
++                    "reason": expected_stderr + "\n" + expected_stdout,
+                 }
+             )
+         )
+@@ -578,7 +658,8 @@ class ResourceCleanupTest(LibraryPacemakerTest):
+         mock_runner.run.assert_called_once_with(self.crm_mon_cmd())
+ 
+     def test_error_cleanup(self):
+-        expected_error = "expected error"
++        expected_stdout = "some info"
++        expected_stderr = "some error"
+         expected_retval = 1
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+         call_list = [
+@@ -586,8 +667,8 @@ class ResourceCleanupTest(LibraryPacemakerTest):
+             mock.call([self.path("crm_resource"), "--cleanup"]),
+         ]
+         return_value_list = [
+-            (self.fixture_status_xml(1, 1), 0),
+-            (expected_error, expected_retval),
++            (self.fixture_status_xml(1, 1), "", 0),
++            (expected_stdout, expected_stderr, expected_retval),
+         ]
+         mock_runner.run.side_effect = return_value_list
+ 
+@@ -597,8 +678,7 @@ class ResourceCleanupTest(LibraryPacemakerTest):
+                 Severity.ERROR,
+                 report_codes.RESOURCE_CLEANUP_ERROR,
+                 {
+-                    "return_value": expected_retval,
+-                    "stdout": expected_error,
++                    "reason": expected_stderr + "\n" + expected_stdout,
+                 }
+             )
+         )
+@@ -609,10 +689,33 @@ class ResourceCleanupTest(LibraryPacemakerTest):
+ 
+ class ResourcesWaitingTest(LibraryPacemakerTest):
+     def test_has_support(self):
+-        expected_output = "something --wait something else"
++        expected_stdout = ""
++        expected_stderr = "something --wait something else"
++        expected_retval = 1
++        mock_runner = mock.MagicMock(spec_set=CommandRunner)
++        mock_runner.run.return_value = (
++            expected_stdout,
++            expected_stderr,
++            expected_retval
++        )
++
++        self.assertTrue(
++            lib.has_resource_wait_support(mock_runner)
++        )
++        mock_runner.run.assert_called_once_with(
++            [self.path("crm_resource"), "-?"]
++        )
++
++    def test_has_support_stdout(self):
++        expected_stdout = "something --wait something else"
++        expected_stderr = ""
+         expected_retval = 1
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (expected_output, expected_retval)
++        mock_runner.run.return_value = (
++            expected_stdout,
++            expected_stderr,
++            expected_retval
++        )
+ 
+         self.assertTrue(
+             lib.has_resource_wait_support(mock_runner)
+@@ -622,10 +725,15 @@ class ResourcesWaitingTest(LibraryPacemakerTest):
+         )
+ 
+     def test_doesnt_have_support(self):
+-        expected_output = "something something else"
++        expected_stdout = "something something else"
++        expected_stderr = "something something else"
+         expected_retval = 1
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (expected_output, expected_retval)
++        mock_runner.run.return_value = (
++            expected_stdout,
++            expected_stderr,
++            expected_retval
++        )
+ 
+         self.assertFalse(
+             lib.has_resource_wait_support(mock_runner)
+@@ -652,10 +760,15 @@ class ResourcesWaitingTest(LibraryPacemakerTest):
+         )
+ 
+     def test_wait_success(self):
+-        expected_output = "expected output"
++        expected_stdout = "expected output"
++        expected_stderr = "expected stderr"
+         expected_retval = 0
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (expected_output, expected_retval)
++        mock_runner.run.return_value = (
++            expected_stdout,
++            expected_stderr,
++            expected_retval
++        )
+ 
+         self.assertEqual(None, lib.wait_for_resources(mock_runner))
+ 
+@@ -664,11 +777,16 @@ class ResourcesWaitingTest(LibraryPacemakerTest):
+         )
+ 
+     def test_wait_timeout_success(self):
+-        expected_output = "expected output"
++        expected_stdout = "expected output"
++        expected_stderr = "expected stderr"
+         expected_retval = 0
+         timeout = 10
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (expected_output, expected_retval)
++        mock_runner.run.return_value = (
++            expected_stdout,
++            expected_stderr,
++            expected_retval
++        )
+ 
+         self.assertEqual(None, lib.wait_for_resources(mock_runner, timeout))
+ 
+@@ -680,10 +798,15 @@ class ResourcesWaitingTest(LibraryPacemakerTest):
+         )
+ 
+     def test_wait_error(self):
+-        expected_error = "some error"
++        expected_stdout = "some info"
++        expected_stderr = "some error"
+         expected_retval = 1
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (expected_error, expected_retval)
++        mock_runner.run.return_value = (
++            expected_stdout,
++            expected_stderr,
++            expected_retval
++        )
+ 
+         assert_raise_library_error(
+             lambda: lib.wait_for_resources(mock_runner),
+@@ -691,8 +814,7 @@ class ResourcesWaitingTest(LibraryPacemakerTest):
+                 Severity.ERROR,
+                 report_codes.RESOURCE_WAIT_ERROR,
+                 {
+-                    "return_value": expected_retval,
+-                    "stdout": expected_error,
++                    "reason": expected_stderr + "\n" + expected_stdout,
+                 }
+             )
+         )
+@@ -702,10 +824,15 @@ class ResourcesWaitingTest(LibraryPacemakerTest):
+         )
+ 
+     def test_wait_error_timeout(self):
+-        expected_error = "some error"
++        expected_stdout = "some info"
++        expected_stderr = "some error"
+         expected_retval = 62
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (expected_error, expected_retval)
++        mock_runner.run.return_value = (
++            expected_stdout,
++            expected_stderr,
++            expected_retval
++        )
+ 
+         assert_raise_library_error(
+             lambda: lib.wait_for_resources(mock_runner),
+@@ -713,8 +840,7 @@ class ResourcesWaitingTest(LibraryPacemakerTest):
+                 Severity.ERROR,
+                 report_codes.RESOURCE_WAIT_TIMED_OUT,
+                 {
+-                    "return_value": expected_retval,
+-                    "stdout": expected_error,
++                    "reason": expected_stderr + "\n" + expected_stdout,
+                 }
+             )
+         )
+@@ -727,7 +853,7 @@ class NodeStandbyTest(LibraryPacemakerNodeStatusTest):
+     def test_standby_local(self):
+         expected_retval = 0
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = ("dummy", expected_retval)
++        mock_runner.run.return_value = ("dummy", "", expected_retval)
+ 
+         output = lib.nodes_standby(mock_runner)
+ 
+@@ -739,7 +865,7 @@ class NodeStandbyTest(LibraryPacemakerNodeStatusTest):
+     def test_unstandby_local(self):
+         expected_retval = 0
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = ("dummy", expected_retval)
++        mock_runner.run.return_value = ("dummy", "", expected_retval)
+ 
+         output = lib.nodes_unstandby(mock_runner)
+ 
+@@ -760,8 +886,8 @@ class NodeStandbyTest(LibraryPacemakerNodeStatusTest):
+             mock.call([self.path("crm_standby"), "-v", "on", "-N", n])
+             for n in nodes
+         ]
+-        return_value_list = [(str(self.status), 0)]
+-        return_value_list += [("dummy", 0) for n in nodes]
++        return_value_list = [(str(self.status), "", 0)]
++        return_value_list += [("dummy", "", 0) for n in nodes]
+         mock_runner.run.side_effect = return_value_list
+ 
+         output = lib.nodes_standby(mock_runner, all_nodes=True)
+@@ -783,8 +909,8 @@ class NodeStandbyTest(LibraryPacemakerNodeStatusTest):
+             mock.call([self.path("crm_standby"), "-D", "-N", n])
+             for n in nodes
+         ]
+-        return_value_list = [(str(self.status), 0)]
+-        return_value_list += [("dummy", 0) for n in nodes]
++        return_value_list = [(str(self.status), "", 0)]
++        return_value_list += [("dummy", "", 0) for n in nodes]
+         mock_runner.run.side_effect = return_value_list
+ 
+         output = lib.nodes_unstandby(mock_runner, all_nodes=True)
+@@ -806,8 +932,8 @@ class NodeStandbyTest(LibraryPacemakerNodeStatusTest):
+             mock.call([self.path("crm_standby"), "-v", "on", "-N", n])
+             for n in nodes[1:]
+         ]
+-        return_value_list = [(str(self.status), 0)]
+-        return_value_list += [("dummy", 0) for n in nodes[1:]]
++        return_value_list = [(str(self.status), "", 0)]
++        return_value_list += [("dummy", "", 0) for n in nodes[1:]]
+         mock_runner.run.side_effect = return_value_list
+ 
+         output = lib.nodes_standby(mock_runner, node_list=nodes[1:])
+@@ -829,8 +955,8 @@ class NodeStandbyTest(LibraryPacemakerNodeStatusTest):
+             mock.call([self.path("crm_standby"), "-D", "-N", n])
+             for n in nodes[:2]
+         ]
+-        return_value_list = [(str(self.status), 0)]
+-        return_value_list += [("dummy", 0) for n in nodes[:2]]
++        return_value_list = [(str(self.status), "", 0)]
++        return_value_list += [("dummy", "", 0) for n in nodes[:2]]
+         mock_runner.run.side_effect = return_value_list
+ 
+         output = lib.nodes_unstandby(mock_runner, node_list=nodes[:2])
+@@ -845,7 +971,7 @@ class NodeStandbyTest(LibraryPacemakerNodeStatusTest):
+             self.fixture_get_node_status("node_1", "id_1")
+         )
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (str(self.status), 0)
++        mock_runner.run.return_value = (str(self.status), "", 0)
+ 
+         assert_raise_library_error(
+             lambda: lib.nodes_standby(mock_runner, ["node_2"]),
+@@ -863,7 +989,7 @@ class NodeStandbyTest(LibraryPacemakerNodeStatusTest):
+             self.fixture_get_node_status("node_1", "id_1")
+         )
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (str(self.status), 0)
++        mock_runner.run.return_value = (str(self.status), "", 0)
+ 
+         assert_raise_library_error(
+             lambda: lib.nodes_unstandby(mock_runner, ["node_2", "node_3"]),
+@@ -882,17 +1008,24 @@ class NodeStandbyTest(LibraryPacemakerNodeStatusTest):
+         mock_runner.run.assert_called_once_with(self.crm_mon_cmd())
+ 
+     def test_error_one_node(self):
+-        expected_error = "some error"
++        expected_stdout = "some info"
++        expected_stderr = "some error"
+         expected_retval = 1
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (expected_error, expected_retval)
++        mock_runner.run.return_value = (
++            expected_stdout,
++            expected_stderr,
++            expected_retval
++        )
+ 
+         assert_raise_library_error(
+             lambda: lib.nodes_unstandby(mock_runner),
+             (
+                 Severity.ERROR,
+                 report_codes.COMMON_ERROR,
+-                {}
++                {
++                    "text": expected_stderr + "\n" + expected_stdout,
++                }
+             )
+         )
+ 
+@@ -913,11 +1046,11 @@ class NodeStandbyTest(LibraryPacemakerNodeStatusTest):
+             for n in nodes
+         ]
+         return_value_list = [
+-            (str(self.status), 0),
+-            ("dummy1", 0),
+-            ("dummy2", 1),
+-            ("dummy3", 0),
+-            ("dummy4", 1),
++            (str(self.status), "", 0),
++            ("dummy1", "", 0),
++            ("dummy2", "error2", 1),
++            ("dummy3", "", 0),
++            ("dummy4", "error4", 1),
+         ]
+         mock_runner.run.side_effect = return_value_list
+ 
+@@ -926,12 +1059,16 @@ class NodeStandbyTest(LibraryPacemakerNodeStatusTest):
+             (
+                 Severity.ERROR,
+                 report_codes.COMMON_ERROR,
+-                {}
++                {
++                    "text": "error2\ndummy2",
++                }
+             ),
+             (
+                 Severity.ERROR,
+                 report_codes.COMMON_ERROR,
+-                {}
++                {
++                    "text": "error4\ndummy4",
++                }
+             )
+         )
+ 
+diff --git a/pcs/test/test_lib_resource_agent.py b/pcs/test/test_lib_resource_agent.py
+index 08f9061..a569e66 100644
+--- a/pcs/test/test_lib_resource_agent.py
++++ b/pcs/test/test_lib_resource_agent.py
+@@ -199,7 +199,7 @@ class GetFenceAgentMetadataTest(LibraryResourceTest):
+     def test_execution_failed(self, mock_is_runnable):
+         mock_is_runnable.return_value = True
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = ("error", 1)
++        mock_runner.run.return_value = ("", "error", 1)
+         agent_name = "fence_ipmi"
+ 
+         self.assert_raises(
+@@ -210,13 +210,13 @@ class GetFenceAgentMetadataTest(LibraryResourceTest):
+ 
+         script_path = os.path.join(settings.fence_agent_binaries, agent_name)
+         mock_runner.run.assert_called_once_with(
+-            [script_path, "-o", "metadata"], ignore_stderr=True
++            [script_path, "-o", "metadata"]
+         )
+ 
+     @mock.patch("pcs.lib.resource_agent.is_path_runnable")
+     def test_invalid_xml(self, mock_is_runnable):
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = ("not xml", 0)
++        mock_runner.run.return_value = ("not xml", "", 0)
+         mock_is_runnable.return_value = True
+         agent_name = "fence_ipmi"
+         self.assert_raises(
+@@ -227,7 +227,7 @@ class GetFenceAgentMetadataTest(LibraryResourceTest):
+ 
+         script_path = os.path.join(settings.fence_agent_binaries, agent_name)
+         mock_runner.run.assert_called_once_with(
+-            [script_path, "-o", "metadata"], ignore_stderr=True
++            [script_path, "-o", "metadata"]
+         )
+ 
+     @mock.patch("pcs.lib.resource_agent.is_path_runnable")
+@@ -235,14 +235,14 @@ class GetFenceAgentMetadataTest(LibraryResourceTest):
+         agent_name = "fence_ipmi"
+         xml = "<xml />"
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (xml, 0)
++        mock_runner.run.return_value = (xml, "", 0)
+         mock_is_runnable.return_value = True
+ 
+         out_dom = lib_ra.get_fence_agent_metadata(mock_runner, agent_name)
+ 
+         script_path = os.path.join(settings.fence_agent_binaries, agent_name)
+         mock_runner.run.assert_called_once_with(
+-            [script_path, "-o", "metadata"], ignore_stderr=True
++            [script_path, "-o", "metadata"]
+         )
+         assert_xml_equal(xml, str(XmlMan(out_dom)))
+ 
+@@ -304,7 +304,7 @@ class GetOcfResourceAgentMetadataTest(LibraryResourceTest):
+         provider = "provider"
+         agent = "agent"
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = ("error", 1)
++        mock_runner.run.return_value = ("", "error", 1)
+         mock_is_runnable.return_value = True
+ 
+         self.assert_raises(
+@@ -318,8 +318,7 @@ class GetOcfResourceAgentMetadataTest(LibraryResourceTest):
+         script_path = os.path.join(settings.ocf_resources, provider, agent)
+         mock_runner.run.assert_called_once_with(
+             [script_path, "meta-data"],
+-            env_extend={"OCF_ROOT": settings.ocf_root},
+-            ignore_stderr=True
++            env_extend={"OCF_ROOT": settings.ocf_root}
+         )
+ 
+     @mock.patch("pcs.lib.resource_agent.is_path_runnable")
+@@ -327,7 +326,7 @@ class GetOcfResourceAgentMetadataTest(LibraryResourceTest):
+         provider = "provider"
+         agent = "agent"
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = ("not xml", 0)
++        mock_runner.run.return_value = ("not xml", "", 0)
+         mock_is_runnable.return_value = True
+ 
+         self.assert_raises(
+@@ -341,8 +340,7 @@ class GetOcfResourceAgentMetadataTest(LibraryResourceTest):
+         script_path = os.path.join(settings.ocf_resources, provider, agent)
+         mock_runner.run.assert_called_once_with(
+             [script_path, "meta-data"],
+-            env_extend={"OCF_ROOT": settings.ocf_root},
+-            ignore_stderr=True
++            env_extend={"OCF_ROOT": settings.ocf_root}
+         )
+ 
+     @mock.patch("pcs.lib.resource_agent.is_path_runnable")
+@@ -351,7 +349,7 @@ class GetOcfResourceAgentMetadataTest(LibraryResourceTest):
+         agent = "agent"
+         xml = "<xml />"
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (xml, 0)
++        mock_runner.run.return_value = (xml, "", 0)
+         mock_is_runnable.return_value = True
+ 
+         out_dom = lib_ra._get_ocf_resource_agent_metadata(
+@@ -361,8 +359,7 @@ class GetOcfResourceAgentMetadataTest(LibraryResourceTest):
+         script_path = os.path.join(settings.ocf_resources, provider, agent)
+         mock_runner.run.assert_called_once_with(
+             [script_path, "meta-data"],
+-            env_extend={"OCF_ROOT": settings.ocf_root},
+-            ignore_stderr=True
++            env_extend={"OCF_ROOT": settings.ocf_root}
+         )
+         assert_xml_equal(xml, str(XmlMan(out_dom)))
+ 
+@@ -596,7 +593,7 @@ class GetPcmkAdvancedStonithParametersTest(LibraryResourceTest):
+             </resource-agent>
+         """
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = (xml, 0)
++        mock_runner.run.return_value = (xml, "", 0)
+         self.assertEqual(
+             [
+                 {
+@@ -623,12 +620,12 @@ class GetPcmkAdvancedStonithParametersTest(LibraryResourceTest):
+             lib_ra._get_pcmk_advanced_stonith_parameters(mock_runner)
+         )
+         mock_runner.run.assert_called_once_with(
+-            [settings.stonithd_binary, "metadata"], ignore_stderr=True
++            [settings.stonithd_binary, "metadata"]
+         )
+ 
+     def test_failed_to_get_xml(self):
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = ("", 1)
++        mock_runner.run.return_value = ("", "some error", 1)
+         self.assert_raises(
+             lib_ra.UnableToGetAgentMetadata,
+             lambda: lib_ra._get_pcmk_advanced_stonith_parameters(mock_runner),
+@@ -636,19 +633,19 @@ class GetPcmkAdvancedStonithParametersTest(LibraryResourceTest):
+         )
+ 
+         mock_runner.run.assert_called_once_with(
+-            [settings.stonithd_binary, "metadata"], ignore_stderr=True
++            [settings.stonithd_binary, "metadata"]
+         )
+ 
+     def test_invalid_xml(self):
+         mock_runner = mock.MagicMock(spec_set=CommandRunner)
+-        mock_runner.run.return_value = ("invalid XML", 0)
++        mock_runner.run.return_value = ("invalid XML", "", 0)
+         self.assertRaises(
+             lib_ra.InvalidMetadataFormat,
+             lambda: lib_ra._get_pcmk_advanced_stonith_parameters(mock_runner)
+         )
+ 
+         mock_runner.run.assert_called_once_with(
+-            [settings.stonithd_binary, "metadata"], ignore_stderr=True
++            [settings.stonithd_binary, "metadata"]
+         )
+ 
+ 
+diff --git a/pcs/test/test_lib_sbd.py b/pcs/test/test_lib_sbd.py
+index 720d8b1..9b7b801 100644
+--- a/pcs/test/test_lib_sbd.py
++++ b/pcs/test/test_lib_sbd.py
+@@ -155,9 +155,8 @@ class AtbHasToBeEnabledTest(TestCase):
+         self.assertFalse(lib_sbd.atb_has_to_be_enabled(
+             self.mock_runner, self.mock_conf, 1
+         ))
+-        mock_is_needed.assert_called_once_with(
+-            self.mock_runner, self.mock_conf, 1
+-        )
++        self.mock_conf.is_enabled_auto_tie_breaker.assert_called_once_with()
++        mock_is_needed.assert_not_called()
+ 
+     def test_atb_needed_is_disabled(self, mock_is_needed):
+         mock_is_needed.return_value = True
+@@ -165,6 +164,7 @@ class AtbHasToBeEnabledTest(TestCase):
+         self.assertTrue(lib_sbd.atb_has_to_be_enabled(
+             self.mock_runner, self.mock_conf, -1
+         ))
++        self.mock_conf.is_enabled_auto_tie_breaker.assert_called_once_with()
+         mock_is_needed.assert_called_once_with(
+             self.mock_runner, self.mock_conf, -1
+         )
+@@ -175,9 +175,8 @@ class AtbHasToBeEnabledTest(TestCase):
+         self.assertFalse(lib_sbd.atb_has_to_be_enabled(
+             self.mock_runner, self.mock_conf, 2
+         ))
+-        mock_is_needed.assert_called_once_with(
+-            self.mock_runner, self.mock_conf, 2
+-        )
++        self.mock_conf.is_enabled_auto_tie_breaker.assert_called_once_with()
++        mock_is_needed.assert_not_called()
+ 
+     def test_atb_not_needed_is_disabled(self, mock_is_needed):
+         mock_is_needed.return_value = False
+@@ -185,6 +184,7 @@ class AtbHasToBeEnabledTest(TestCase):
+         self.assertFalse(lib_sbd.atb_has_to_be_enabled(
+             self.mock_runner, self.mock_conf, -2
+         ))
++        self.mock_conf.is_enabled_auto_tie_breaker.assert_called_once_with()
+         mock_is_needed.assert_called_once_with(
+             self.mock_runner, self.mock_conf, -2
+         )
+-- 
+1.8.3.1
+

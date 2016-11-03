@@ -1,0 +1,1904 @@
+From 798a8ab276fb816c3d9cfa5ba0a8ed55a3ed6cd2 Mon Sep 17 00:00:00 2001
+From: Ivan Devat <idevat@redhat.com>
+Date: Mon, 29 Aug 2016 15:14:25 +0200
+Subject: [PATCH] squash bz1308514 Wider support for booth configura
+
+50fb38db5e26 append a new line at the end of the booth config
+
+a03b98c0f9e1 add bash completion for booth
+
+52b97fa9ef32 clean up ip resource if creating booth res. fails
+
+3d0e698a83fc fix allow force remove multiple booth resources
+
+1ac88efab2cd refactor booth remove
+
+6b41c5cc1661 add booth restart command
+
+706c6f32f172 fix usage: ticket grant/revoke not for arbitrator
+
+26fa2a241227 complete man (stayed behind usage)
+
+75f8da852641 modify exchange format of booth config
+
+ffe6ec7ea8d2 show all booth config lines including unsupported
+
+8722fb7ede2e add support for options during add booth ticket
+
+50eb49a4350b fix naming of booth reportes and report codes according to convetions
+
+6dfb7c82d802 simplify booth config distribution reports
+
+116a7a311cd7 fix adding node to cluster when booth is not installed
+
+23abb122e2d1 fix getting a list of existing booth config files
+
+ebd9fc496e24 display booth config as it is (plain, not parsed)
+
+0183814dd57a add ability to display booth config from a remote node
+---
+ pcs/booth.py                                |   6 +-
+ pcs/cli/booth/command.py                    |  72 ++++++++++--------
+ pcs/cli/booth/test/test_command.py          |  21 ++++--
+ pcs/cli/common/lib_wrapper.py               |   3 +-
+ pcs/common/report_codes.py                  |   9 +--
+ pcs/lib/booth/config_exchange.py            |  47 ++++--------
+ pcs/lib/booth/config_files.py               |  15 +++-
+ pcs/lib/booth/config_parser.py              |   3 +-
+ pcs/lib/booth/config_structure.py           |  35 ++++++++-
+ pcs/lib/booth/reports.py                    |  97 +++++++++++++-----------
+ pcs/lib/booth/resource.py                   |  49 ++++--------
+ pcs/lib/booth/sync.py                       |  12 +--
+ pcs/lib/booth/test/test_config_exchange.py  |  56 ++++++--------
+ pcs/lib/booth/test/test_config_files.py     |  32 ++++++--
+ pcs/lib/booth/test/test_config_parser.py    |   2 +
+ pcs/lib/booth/test/test_config_structure.py |  66 ++++++++++++++++-
+ pcs/lib/booth/test/test_resource.py         | 111 ++++++++++++----------------
+ pcs/lib/booth/test/test_sync.py             |  56 +++++++-------
+ pcs/lib/commands/booth.py                   |  88 ++++++++++++++--------
+ pcs/lib/commands/test/test_booth.py         |  50 +++++++------
+ pcs/pcs.8                                   |  11 ++-
+ pcs/test/test_booth.py                      |  77 +++++++++++++++++--
+ pcs/usage.py                                |  13 +++-
+ 23 files changed, 564 insertions(+), 367 deletions(-)
+
+diff --git a/pcs/booth.py b/pcs/booth.py
+index 764dcd8..5ec41bf 100644
+--- a/pcs/booth.py
++++ b/pcs/booth.py
+@@ -12,7 +12,7 @@ from pcs import utils
+ from pcs.cli.booth import command
+ from pcs.cli.common.errors import CmdLineInputError
+ from pcs.lib.errors import LibraryError
+-from pcs.resource import resource_create, resource_remove
++from pcs.resource import resource_create, resource_remove, resource_restart
+ 
+ 
+ def booth_cmd(lib, argv, modifiers):
+@@ -47,13 +47,15 @@ def booth_cmd(lib, argv, modifiers):
+             else:
+                 raise CmdLineInputError()
+         elif sub_cmd == "create":
+-            command.get_create_in_cluster(resource_create)(
++            command.get_create_in_cluster(resource_create, resource_remove)(
+                 lib, argv_next, modifiers
+             )
+         elif sub_cmd == "remove":
+             command.get_remove_from_cluster(resource_remove)(
+                 lib, argv_next, modifiers
+             )
++        elif sub_cmd == "restart":
++            command.get_restart(resource_restart)(lib, argv_next, modifiers)
+         elif sub_cmd == "sync":
+             command.sync(lib, argv_next, modifiers)
+         elif sub_cmd == "pull":
+diff --git a/pcs/cli/booth/command.py b/pcs/cli/booth/command.py
+index bea6582..0b71a01 100644
+--- a/pcs/cli/booth/command.py
++++ b/pcs/cli/booth/command.py
+@@ -6,7 +6,7 @@ from __future__ import (
+ )
+ 
+ from pcs.cli.common.errors import CmdLineInputError
+-from pcs.cli.common.parse_args import group_by_keywords
++from pcs.cli.common.parse_args import group_by_keywords, prepare_options
+ 
+ 
+ DEFAULT_BOOTH_NAME = "booth"
+@@ -18,15 +18,25 @@ def config_setup(lib, arg_list, modifiers):
+     """
+     create booth config
+     """
+-    booth_configuration = group_by_keywords(
++    peers = group_by_keywords(
+         arg_list,
+         set(["sites", "arbitrators"]),
+         keyword_repeat_allowed=False
+     )
+-    if "sites" not in booth_configuration or not booth_configuration["sites"]:
++    if "sites" not in peers or not peers["sites"]:
+         raise CmdLineInputError()
+ 
+-    lib.booth.config_setup(booth_configuration, modifiers["force"])
++    booth_config = []
++    for site in peers["sites"]:
++        booth_config.append({"key": "site", "value": site, "details": []})
++    for arbitrator in peers["arbitrators"]:
++        booth_config.append({
++            "key": "arbitrator",
++            "value": arbitrator,
++            "details": [],
++        })
++
++    lib.booth.config_setup(booth_config, modifiers["force"])
+ 
+ def config_destroy(lib, arg_list, modifiers):
+     """
+@@ -41,36 +51,20 @@ def config_show(lib, arg_list, modifiers):
+     """
+     print booth config
+     """
+-    booth_configuration = lib.booth.config_show()
+-    authfile_lines = []
+-    if booth_configuration["authfile"]:
+-        authfile_lines.append(
+-            "authfile = {0}".format(booth_configuration["authfile"])
+-        )
++    if len(arg_list) > 1:
++        raise CmdLineInputError()
++    node = None if not arg_list else arg_list[0]
++
++    print(lib.booth.config_text(DEFAULT_BOOTH_NAME, node), end="")
+ 
+-    line_list = (
+-        ["site = {0}".format(site) for site in booth_configuration["sites"]]
+-        +
+-        [
+-            "arbitrator = {0}".format(arbitrator)
+-            for arbitrator in booth_configuration["arbitrators"]
+-        ]
+-        + authfile_lines +
+-        [
+-            'ticket = "{0}"'.format(ticket)
+-            for ticket in booth_configuration["tickets"]
+-        ]
+-    )
+-    for line in line_list:
+-        print(line)
+ 
+ def config_ticket_add(lib, arg_list, modifiers):
+     """
+     add ticket to current configuration
+     """
+-    if len(arg_list) != 1:
++    if not arg_list:
+         raise CmdLineInputError
+-    lib.booth.config_ticket_add(arg_list[0])
++    lib.booth.config_ticket_add(arg_list[0], prepare_options(arg_list[1:]))
+ 
+ def config_ticket_remove(lib, arg_list, modifiers):
+     """
+@@ -96,7 +90,7 @@ def ticket_revoke(lib, arg_list, modifiers):
+ def ticket_grant(lib, arg_list, modifiers):
+     ticket_operation(lib.booth.ticket_grant, arg_list, modifiers)
+ 
+-def get_create_in_cluster(resource_create):
++def get_create_in_cluster(resource_create, resource_remove):
+     #TODO resource_remove is provisional hack until resources are not moved to
+     #lib
+     def create_in_cluster(lib, arg_list, modifiers):
+@@ -108,6 +102,7 @@ def get_create_in_cluster(resource_create):
+             __get_name(modifiers),
+             ip,
+             resource_create,
++            resource_remove,
+         )
+     return create_in_cluster
+ 
+@@ -118,10 +113,28 @@ def get_remove_from_cluster(resource_remove):
+         if arg_list:
+             raise CmdLineInputError()
+ 
+-        lib.booth.remove_from_cluster(__get_name(modifiers), resource_remove)
++        lib.booth.remove_from_cluster(
++            __get_name(modifiers),
++            resource_remove,
++            modifiers["force"],
++        )
+ 
+     return remove_from_cluster
+ 
++def get_restart(resource_restart):
++    #TODO resource_restart is provisional hack until resources are not moved to
++    #lib
++    def restart(lib, arg_list, modifiers):
++        if arg_list:
++            raise CmdLineInputError()
++
++        lib.booth.restart(
++            __get_name(modifiers),
++            resource_restart,
++            modifiers["force"],
++        )
++
++    return restart
+ 
+ def sync(lib, arg_list, modifiers):
+     if arg_list:
+@@ -175,3 +188,4 @@ def status(lib, arg_list, modifiers):
+     if booth_status.get("status"):
+         print("DAEMON STATUS:")
+         print(booth_status["status"])
++
+diff --git a/pcs/cli/booth/test/test_command.py b/pcs/cli/booth/test/test_command.py
+index 00216f2..019a74f 100644
+--- a/pcs/cli/booth/test/test_command.py
++++ b/pcs/cli/booth/test/test_command.py
+@@ -28,10 +28,12 @@ class ConfigSetupTest(TestCase):
+             }
+         )
+         lib.booth.config_setup.assert_called_once_with(
+-            {
+-                "sites": ["1.1.1.1", "2.2.2.2", "4.4.4.4"],
+-                "arbitrators": ["3.3.3.3"],
+-            },
++            [
++                {"key": "site", "value": "1.1.1.1", "details": []},
++                {"key": "site", "value": "2.2.2.2", "details": []},
++                {"key": "site", "value": "4.4.4.4", "details": []},
++                {"key": "arbitrator", "value": "3.3.3.3", "details": []},
++            ],
+             False
+         )
+ 
+@@ -40,5 +42,12 @@ class ConfigTicketAddTest(TestCase):
+         lib = mock.MagicMock()
+         lib.booth = mock.MagicMock()
+         lib.booth.config_ticket_add = mock.MagicMock()
+-        command.config_ticket_add(lib, arg_list=["TICKET_A"], modifiers={})
+-        lib.booth.config_ticket_add.assert_called_once_with("TICKET_A")
++        command.config_ticket_add(
++            lib,
++            arg_list=["TICKET_A", "timeout=10"],
++            modifiers={}
++        )
++        lib.booth.config_ticket_add.assert_called_once_with(
++            "TICKET_A",
++            {"timeout": "10"},
++        )
+diff --git a/pcs/cli/common/lib_wrapper.py b/pcs/cli/common/lib_wrapper.py
+index c836575..94a1311 100644
+--- a/pcs/cli/common/lib_wrapper.py
++++ b/pcs/cli/common/lib_wrapper.py
+@@ -209,11 +209,12 @@ def load_module(env, middleware_factory, name):
+             {
+                 "config_setup": booth.config_setup,
+                 "config_destroy": booth.config_destroy,
+-                "config_show": booth.config_show,
++                "config_text": booth.config_text,
+                 "config_ticket_add": booth.config_ticket_add,
+                 "config_ticket_remove": booth.config_ticket_remove,
+                 "create_in_cluster": booth.create_in_cluster,
+                 "remove_from_cluster": booth.remove_from_cluster,
++                "restart": booth.restart,
+                 "config_sync": booth.config_sync,
+                 "enable": booth.enable_booth,
+                 "disable": booth.disable_booth,
+diff --git a/pcs/common/report_codes.py b/pcs/common/report_codes.py
+index 672c2e3..5e46a1f 100644
+--- a/pcs/common/report_codes.py
++++ b/pcs/common/report_codes.py
+@@ -29,16 +29,15 @@ BOOTH_ADDRESS_DUPLICATION = "BOOTH_ADDRESS_DUPLICATION"
+ BOOTH_ALREADY_IN_CIB = "BOOTH_ALREADY_IN_CIB"
+ BOOTH_CANNOT_DETERMINE_LOCAL_SITE_IP = "BOOTH_CANNOT_DETERMINE_LOCAL_SITE_IP"
+ BOOTH_CANNOT_IDENTIFY_KEYFILE = "BOOTH_CANNOT_IDENTIFY_KEYFILE"
++BOOTH_CONFIG_ACCEPTED_BY_NODE = "BOOTH_CONFIG_ACCEPTED_BY_NODE"
++BOOTH_CONFIG_DISTRIBUTION_NODE_ERROR = "BOOTH_CONFIG_DISTRIBUTION_NODE_ERROR"
++BOOTH_CONFIG_DISTRIBUTION_STARTED = "BOOTH_CONFIG_DISTRIBUTION_STARTED"
+ BOOTH_CONFIG_FILE_ALREADY_EXISTS = "BOOTH_CONFIG_FILE_ALREADY_EXISTS"
+ BOOTH_CONFIG_IO_ERROR = "BOOTH_CONFIG_IO_ERROR"
+ BOOTH_CONFIG_IS_USED = "BOOTH_CONFIG_IS_USED"
+ BOOTH_CONFIG_READ_ERROR = "BOOTH_CONFIG_READ_ERROR"
+-BOOTH_CONFIG_WRITE_ERROR = "BOOTH_CONFIG_WRITE_ERROR"
+ BOOTH_CONFIG_UNEXPECTED_LINES = "BOOTH_CONFIG_UNEXPECTED_LINES"
+-BOOTH_CONFIGS_SAVED_ON_NODE = "BOOTH_CONFIGS_SAVED_ON_NODE"
+-BOOTH_CONFIGS_SAVING_ON_NODE = "BOOTH_CONFIGS_SAVING_ON_NODE"
+ BOOTH_DAEMON_STATUS_ERROR = "BOOTH_DAEMON_STATUS_ERROR"
+-BOOTH_DISTRIBUTING_CONFIG = "BOOTH_DISTRIBUTING_CONFIG"
+ BOOTH_EVEN_PEERS_NUM = "BOOTH_EVEN_PEERS_NUM"
+ BOOTH_FETCHING_CONFIG_FROM_NODE = "BOOTH_FETCHING_CONFIG_FROM_NODE"
+ BOOTH_INVALID_CONFIG_NAME = "BOOTH_INVALID_CONFIG_NAME"
+@@ -50,8 +49,8 @@ BOOTH_PEERS_STATUS_ERROR = "BOOTH_PEERS_STATUS_ERROR"
+ BOOTH_SKIPPING_CONFIG = "BOOTH_SKIPPING_CONFIG"
+ BOOTH_TICKET_DOES_NOT_EXIST = "BOOTH_TICKET_DOES_NOT_EXIST"
+ BOOTH_TICKET_DUPLICATE = "BOOTH_TICKET_DUPLICATE"
+-BOOTH_TICKET_OPERATION_FAILED = "BOOTH_TICKET_OPERATION_FAILED"
+ BOOTH_TICKET_NAME_INVALID = "BOOTH_TICKET_NAME_INVALID"
++BOOTH_TICKET_OPERATION_FAILED = "BOOTH_TICKET_OPERATION_FAILED"
+ BOOTH_TICKET_STATUS_ERROR = "BOOTH_TICKET_STATUS_ERROR"
+ BOOTH_UNSUPORTED_FILE_LOCATION = "BOOTH_UNSUPORTED_FILE_LOCATION"
+ CIB_ALERT_NOT_FOUND = "CIB_ALERT_NOT_FOUND"
+diff --git a/pcs/lib/booth/config_exchange.py b/pcs/lib/booth/config_exchange.py
+index e0569ba..377af1d 100644
+--- a/pcs/lib/booth/config_exchange.py
++++ b/pcs/lib/booth/config_exchange.py
+@@ -6,38 +6,23 @@ from __future__ import (
+ )
+ from pcs.lib.booth.config_structure import ConfigItem
+ 
+-EXCHANGE_PRIMITIVES = ["authfile"]
+-EXCHANGE_LISTS = [
+-    ("site", "sites"),
+-    ("arbitrator", "arbitrators"),
+-    ("ticket", "tickets"),
+-]
+-
+-
+ def to_exchange_format(booth_configuration):
+-    exchange_lists = dict(EXCHANGE_LISTS)
+-    exchange = dict(
+-        (exchange_key, []) for exchange_key in exchange_lists.values()
+-    )
+-
+-    for key, value, _ in booth_configuration:
+-        if key in exchange_lists:
+-            exchange[exchange_lists[key]].append(value)
+-        if key in EXCHANGE_PRIMITIVES:
+-            exchange[key] = value
+-
+-    return exchange
++    return [
++        {
++            "key": item.key,
++            "value": item.value,
++            "details": to_exchange_format(item.details),
++        }
++        for item in booth_configuration
++    ]
+ 
+ 
+ def from_exchange_format(exchange_format):
+-    booth_config = []
+-    for key in EXCHANGE_PRIMITIVES:
+-        if key in exchange_format:
+-            booth_config.append(ConfigItem(key, exchange_format[key]))
+-
+-    for key, exchange_key in EXCHANGE_LISTS:
+-        booth_config.extend([
+-            ConfigItem(key, value)
+-            for value in exchange_format.get(exchange_key, [])
+-        ])
+-    return booth_config
++    return [
++        ConfigItem(
++            item["key"],
++            item["value"],
++            from_exchange_format(item["details"]),
++        )
++        for item in exchange_format
++    ]
+diff --git a/pcs/lib/booth/config_files.py b/pcs/lib/booth/config_files.py
+index aaad951..7b91379 100644
+--- a/pcs/lib/booth/config_files.py
++++ b/pcs/lib/booth/config_files.py
+@@ -24,10 +24,17 @@ def get_all_configs_file_names():
+     Returns list of all file names ending with '.conf' in booth configuration
+     directory.
+     """
++    if not os.path.isdir(BOOTH_CONFIG_DIR):
++        return []
+     return [
+-        file_name for file_name in os.listdir(BOOTH_CONFIG_DIR)
+-        if os.path.isfile(file_name) and file_name.endswith(".conf") and
+-        len(file_name) > len(".conf")
++        file_name
++        for file_name in os.listdir(BOOTH_CONFIG_DIR)
++        if
++            file_name.endswith(".conf")
++            and
++            len(file_name) > len(".conf")
++            and
++            os.path.isfile(os.path.join(BOOTH_CONFIG_DIR, file_name))
+     ]
+ 
+ 
+@@ -55,7 +62,7 @@ def read_configs(reporter, skip_wrong_config=False):
+         try:
+             output[file_name] = _read_config(file_name)
+         except EnvironmentError:
+-            report_list.append(reports.booth_config_unable_to_read(
++            report_list.append(reports.booth_config_read_error(
+                 file_name,
+                 (
+                     ReportItemSeverity.WARNING if skip_wrong_config
+diff --git a/pcs/lib/booth/config_parser.py b/pcs/lib/booth/config_parser.py
+index 62d2203..bdc79fd 100644
+--- a/pcs/lib/booth/config_parser.py
++++ b/pcs/lib/booth/config_parser.py
+@@ -23,7 +23,8 @@ def parse(content):
+         )
+ 
+ def build(config_line_list):
+-    return "\n".join(build_to_lines(config_line_list))
++    newline = [""]
++    return "\n".join(build_to_lines(config_line_list) + newline)
+ 
+ def build_to_lines(config_line_list, deep=0):
+     line_list = []
+diff --git a/pcs/lib/booth/config_structure.py b/pcs/lib/booth/config_structure.py
+index c92f718..8977b7a 100644
+--- a/pcs/lib/booth/config_structure.py
++++ b/pcs/lib/booth/config_structure.py
+@@ -7,6 +7,7 @@ from __future__ import (
+ 
+ import re
+ 
++import pcs.lib.reports as common_reports
+ from pcs.lib.booth import reports
+ from pcs.lib.errors import LibraryError
+ from collections import namedtuple
+@@ -66,6 +67,15 @@ def validate_peers(site_list, arbitrator_list):
+     if report:
+         raise LibraryError(*report)
+ 
++def take_peers(booth_configuration):
++    return (
++        pick_list_by_key(booth_configuration, "site"),
++        pick_list_by_key(booth_configuration, "arbitrator"),
++    )
++
++def pick_list_by_key(booth_configuration, key):
++    return [item.value for item in booth_configuration if item.key == key]
++
+ def remove_ticket(booth_configuration, ticket_name):
+     validate_ticket_exists(booth_configuration, ticket_name)
+     return [
+@@ -73,11 +83,14 @@ def remove_ticket(booth_configuration, ticket_name):
+         if config_item.key != "ticket" or config_item.value != ticket_name
+     ]
+ 
+-def add_ticket(booth_configuration, ticket_name):
++def add_ticket(booth_configuration, ticket_name, options):
+     validate_ticket_name(ticket_name)
+     validate_ticket_unique(booth_configuration, ticket_name)
++    validate_ticket_options(options)
+     return booth_configuration + [
+-        ConfigItem("ticket", ticket_name)
++        ConfigItem("ticket", ticket_name, [
++            ConfigItem(key, value) for key, value in options.items()
++        ])
+     ]
+ 
+ def validate_ticket_exists(booth_configuration, ticket_name):
+@@ -88,6 +101,24 @@ def validate_ticket_unique(booth_configuration, ticket_name):
+     if ticket_exists(booth_configuration, ticket_name):
+         raise LibraryError(reports.booth_ticket_duplicate(ticket_name))
+ 
++def validate_ticket_options(options):
++    reports = []
++    for key in sorted(options):
++        if key in GLOBAL_KEYS:
++            reports.append(
++                common_reports.invalid_option(key, TICKET_KEYS, "booth ticket")
++            )
++
++        if not options[key].strip():
++            reports.append(common_reports.invalid_option_value(
++                key,
++                options[key],
++                "no-empty",
++            ))
++
++    if reports:
++        raise LibraryError(*reports)
++
+ def ticket_exists(booth_configuration, ticket_name):
+     return any(
+         value for key, value, _ in booth_configuration
+diff --git a/pcs/lib/booth/reports.py b/pcs/lib/booth/reports.py
+index 8a804e0..6aa9d3d 100644
+--- a/pcs/lib/booth/reports.py
++++ b/pcs/lib/booth/reports.py
+@@ -197,22 +197,17 @@ def booth_multiple_times_in_cib(
+     )
+ 
+ 
+-def booth_distributing_config(name=None):
++def booth_config_distribution_started():
+     """
+-    Sending booth config to all nodes in cluster.
+-
+-    name -- name of booth instance
++    booth configuration is about to be sent to nodes
+     """
+     return ReportItem.info(
+-        report_codes.BOOTH_DISTRIBUTING_CONFIG,
+-        "Sending booth config{0} to all cluster nodes.".format(
+-            " ({name})" if name and name != "booth" else ""
+-        ),
+-        info={"name": name}
++        report_codes.BOOTH_CONFIG_DISTRIBUTION_STARTED,
++        "Sending booth configuration to cluster nodes..."
+     )
+ 
+ 
+-def booth_config_saved(node=None, name_list=None):
++def booth_config_accepted_by_node(node=None, name_list=None):
+     """
+     Booth config has been saved on specified node.
+ 
+@@ -229,7 +224,7 @@ def booth_config_saved(node=None, name_list=None):
+         msg = "Booth config saved."
+         name = None
+     return ReportItem.info(
+-        report_codes.BOOTH_CONFIGS_SAVED_ON_NODE,
++        report_codes.BOOTH_CONFIG_ACCEPTED_BY_NODE,
+         msg if node is None else "{node}: " + msg,
+         info={
+             "node": node,
+@@ -239,30 +234,7 @@ def booth_config_saved(node=None, name_list=None):
+     )
+ 
+ 
+-def booth_config_unable_to_read(
+-    name, severity=ReportItemSeverity.ERROR, forceable=None
+-):
+-    """
+-    Unable to read from specified booth instance config.
+-
+-    name -- name of booth instance
+-    severity -- severity of report item
+-    forceable -- is this report item forceable? by what category?
+-    """
+-    if name and name != "booth":
+-        msg = "Unable to read booth config ({name})."
+-    else:
+-        msg = "Unable to read booth config."
+-    return ReportItem(
+-        report_codes.BOOTH_CONFIG_READ_ERROR,
+-        severity,
+-        msg,
+-        info={"name": name},
+-        forceable=forceable
+-    )
+-
+-
+-def booth_config_not_saved(node, reason, name=None):
++def booth_config_distribution_node_error(node, reason, name=None):
+     """
+     Saving booth config failed on specified node.
+ 
+@@ -275,7 +247,7 @@ def booth_config_not_saved(node, reason, name=None):
+     else:
+         msg = "Unable to save booth config on node '{node}': {reason}"
+     return ReportItem.error(
+-        report_codes.BOOTH_CONFIG_WRITE_ERROR,
++        report_codes.BOOTH_CONFIG_DISTRIBUTION_NODE_ERROR,
+         msg,
+         info={
+             "node": node,
+@@ -285,20 +257,36 @@ def booth_config_not_saved(node, reason, name=None):
+     )
+ 
+ 
+-def booth_sending_local_configs_to_node(node):
++def booth_config_read_error(
++    name, severity=ReportItemSeverity.ERROR, forceable=None
++):
+     """
+-    Sending all local booth configs to node
++    Unable to read from specified booth instance config.
+ 
+-    node -- node name
++    name -- name of booth instance
++    severity -- severity of report item
++    forceable -- is this report item forceable? by what category?
+     """
+-    return ReportItem.info(
+-        report_codes.BOOTH_CONFIGS_SAVING_ON_NODE,
+-        "{node}: Saving booth config(s)...",
+-        info={"node": node}
++    if name and name != "booth":
++        msg = "Unable to read booth config ({name})."
++    else:
++        msg = "Unable to read booth config."
++    return ReportItem(
++        report_codes.BOOTH_CONFIG_READ_ERROR,
++        severity,
++        msg,
++        info={"name": name},
++        forceable=forceable
+     )
+ 
+ 
+-def booth_fetching_config_from_node(node, config=None):
++def booth_fetching_config_from_node_started(node, config=None):
++    """
++    fetching of booth config from specified node started
++
++    node -- node from which config is fetching
++    config -- config name
++    """
+     if config or config == 'booth':
+         msg = "Fetching booth config from node '{node}'..."
+     else:
+@@ -314,6 +302,12 @@ def booth_fetching_config_from_node(node, config=None):
+ 
+ 
+ def booth_unsupported_file_location(file):
++    """
++    location of booth configuration file (config, authfile) file is not
++    supported (not in /etc/booth/)
++
++    file -- file path
++    """
+     return ReportItem.warning(
+         report_codes.BOOTH_UNSUPORTED_FILE_LOCATION,
+         "skipping file {file}: unsupported file location",
+@@ -322,6 +316,11 @@ def booth_unsupported_file_location(file):
+ 
+ 
+ def booth_daemon_status_error(reason):
++    """
++    Unable to get status of booth daemon because of error.
++
++    reason -- reason
++    """
+     return ReportItem.error(
+         report_codes.BOOTH_DAEMON_STATUS_ERROR,
+         "unable to get status of booth daemon: {reason}",
+@@ -330,6 +329,11 @@ def booth_daemon_status_error(reason):
+ 
+ 
+ def booth_tickets_status_error(reason=None):
++    """
++    Unable to get status of booth tickets because of error.
++
++    reason -- reason
++    """
+     return ReportItem.error(
+         report_codes.BOOTH_TICKET_STATUS_ERROR,
+         "unable to get status of booth tickets",
+@@ -340,6 +344,11 @@ def booth_tickets_status_error(reason=None):
+ 
+ 
+ def booth_peers_status_error(reason=None):
++    """
++    Unable to get status of booth peers because of error.
++
++    reason -- reason
++    """
+     return ReportItem.error(
+         report_codes.BOOTH_PEERS_STATUS_ERROR,
+         "unable to get status of booth peers",
+diff --git a/pcs/lib/booth/resource.py b/pcs/lib/booth/resource.py
+index e793713..a4b7b1e 100644
+--- a/pcs/lib/booth/resource.py
++++ b/pcs/lib/booth/resource.py
+@@ -8,18 +8,12 @@ from __future__ import (
+ from pcs.lib.cib.tools import find_unique_id
+ 
+ 
+-class BoothNotFoundInCib(Exception):
+-    pass
+-
+-class BoothMultipleOccurenceFoundInCib(Exception):
+-    pass
+-
+ def create_resource_id(resources_section, name, suffix):
+     return find_unique_id(
+         resources_section.getroottree(), "booth-{0}-{1}".format(name, suffix)
+     )
+ 
+-def get_creator(resource_create):
++def get_creator(resource_create, resource_remove=None):
+     #TODO resource_create  is provisional hack until resources are not moved to
+     #lib
+     def create_booth_in_cluster(ip, booth_config_file_path, create_id):
+@@ -36,15 +30,18 @@ def get_creator(resource_create):
+             clone_opts=[],
+             group=group_id,
+         )
+-        resource_create(
+-            ra_id=booth_id,
+-            ra_type="ocf:pacemaker:booth-site",
+-            ra_values=["config={0}".format(booth_config_file_path)],
+-            op_values=[],
+-            meta_values=[],
+-            clone_opts=[],
+-            group=group_id,
+-        )
++        try:
++            resource_create(
++                ra_id=booth_id,
++                ra_type="ocf:pacemaker:booth-site",
++                ra_values=["config={0}".format(booth_config_file_path)],
++                op_values=[],
++                meta_values=[],
++                clone_opts=[],
++                group=group_id,
++            )
++        except SystemExit:
++            resource_remove(ip_id)
+     return create_booth_in_cluster
+ 
+ def is_ip_resource(resource_element):
+@@ -64,28 +61,12 @@ def find_grouped_ip_element_to_remove(booth_element):
+     return None
+ 
+ def get_remover(resource_remove):
+-    def remove_from_cluster(
+-        resources_section, booth_config_file_path, remove_multiple=False
+-    ):
+-        element_list = find_for_config(
+-            resources_section,
+-            booth_config_file_path
+-        )
+-        if not element_list:
+-            raise BoothNotFoundInCib()
+-
+-        if len(element_list) > 1 and not remove_multiple:
+-            raise BoothMultipleOccurenceFoundInCib()
+-
+-        number_of_removed_booth_elements = 0
+-        for element in element_list:
++    def remove_from_cluster(booth_element_list):
++        for element in booth_element_list:
+             ip_resource_to_remove = find_grouped_ip_element_to_remove(element)
+             if ip_resource_to_remove is not None:
+                 resource_remove(ip_resource_to_remove.attrib["id"])
+             resource_remove(element.attrib["id"])
+-            number_of_removed_booth_elements += 1
+-
+-        return number_of_removed_booth_elements
+ 
+     return remove_from_cluster
+ 
+diff --git a/pcs/lib/booth/sync.py b/pcs/lib/booth/sync.py
+index c9bc30b..374b96d 100644
+--- a/pcs/lib/booth/sync.py
++++ b/pcs/lib/booth/sync.py
+@@ -57,7 +57,7 @@ def _set_config_on_node(
+         "remote/booth_set_config",
+         NodeCommunicator.format_data_dict([("data_json", json.dumps(data))])
+     )
+-    reporter.process(reports.booth_config_saved(node.label, [name]))
++    reporter.process(reports.booth_config_accepted_by_node(node.label, [name]))
+ 
+ 
+ def send_config_to_all_nodes(
+@@ -77,7 +77,7 @@ def send_config_to_all_nodes(
+     authfile_data -- content of authfile as bytes
+     skip_offline -- if True offline nodes will be skipped
+     """
+-    reporter.process(reports.booth_distributing_config(name))
++    reporter.process(reports.booth_config_distribution_started())
+     parallel_nodes_communication_helper(
+         _set_config_on_node,
+         [
+@@ -115,6 +115,9 @@ def send_all_config_to_node(
+     config_dict = booth_conf.read_configs(reporter, skip_wrong_config)
+     if not config_dict:
+         return
++
++    reporter.process(reports.booth_config_distribution_started())
++
+     file_list = []
+     for config, config_data in sorted(config_dict.items()):
+         try:
+@@ -145,7 +148,6 @@ def send_all_config_to_node(
+     if rewrite_existing:
+         data.append(("rewrite_existing", "1"))
+ 
+-    reporter.process(reports.booth_sending_local_configs_to_node(node.label))
+     try:
+         response = json.loads(communicator.call_node(
+             node,
+@@ -165,12 +167,12 @@ def send_all_config_to_node(
+                 node.label
+             ))
+         for file, reason in response["failed"].items():
+-            report_list.append(reports.booth_config_not_saved(
++            report_list.append(reports.booth_config_distribution_node_error(
+                 node.label, reason, file
+             ))
+         reporter.process_list(report_list)
+         reporter.process(
+-            reports.booth_config_saved(node.label, response["saved"])
++            reports.booth_config_accepted_by_node(node.label, response["saved"])
+         )
+     except NodeCommunicationException as e:
+         raise LibraryError(node_communicator_exception_to_report_item(e))
+diff --git a/pcs/lib/booth/test/test_config_exchange.py b/pcs/lib/booth/test/test_config_exchange.py
+index a9a40ce..eb1885c 100644
+--- a/pcs/lib/booth/test/test_config_exchange.py
++++ b/pcs/lib/booth/test/test_config_exchange.py
+@@ -17,47 +17,35 @@ class FromExchangeFormatTest(TestCase):
+                 config_structure.ConfigItem("site", "2.2.2.2"),
+                 config_structure.ConfigItem("arbitrator", "3.3.3.3"),
+                 config_structure.ConfigItem("ticket", "TA"),
+-                config_structure.ConfigItem("ticket", "TB"),
++                config_structure.ConfigItem("ticket", "TB", [
++                    config_structure.ConfigItem("expire", "10")
++                ]),
+             ],
+-            config_exchange.from_exchange_format(
+-                {
+-                    "sites": ["1.1.1.1", "2.2.2.2"],
+-                    "arbitrators": ["3.3.3.3"],
+-                    "tickets": ["TA", "TB"],
+-                    "authfile": "/path/to/auth.file",
+-                },
+-            )
++            config_exchange.from_exchange_format([
++                {"key": "authfile","value": "/path/to/auth.file","details": []},
++                {"key": "site", "value": "1.1.1.1", "details": []},
++                {"key": "site", "value": "2.2.2.2", "details": []},
++                {"key": "arbitrator", "value": "3.3.3.3", "details": []},
++                {"key": "ticket", "value": "TA", "details": []},
++                {"key": "ticket", "value": "TB", "details": [
++                    {"key": "expire", "value": "10", "details": []}
++                ]},
++            ])
+         )
+ 
+ 
+ class GetExchenageFormatTest(TestCase):
+     def test_convert_parsed_config_to_exchange_format(self):
+         self.assertEqual(
+-            {
+-                "sites": ["1.1.1.1", "2.2.2.2"],
+-                "arbitrators": ["3.3.3.3"],
+-                "tickets": ["TA", "TB"],
+-                "authfile": "/path/to/auth.file",
+-            },
+-            config_exchange.to_exchange_format([
+-                config_structure.ConfigItem("site", "1.1.1.1"),
+-                config_structure.ConfigItem("site", "2.2.2.2"),
+-                config_structure.ConfigItem("arbitrator", "3.3.3.3"),
+-                config_structure.ConfigItem("authfile", "/path/to/auth.file"),
+-                config_structure.ConfigItem("ticket", "TA"),
+-                config_structure.ConfigItem("ticket", "TB", [
+-                    config_structure.ConfigItem("timeout", "10")
+-                ]),
+-            ])
+-        )
+-
+-    def test_convert_parsed_config_to_exchange_format_without_authfile(self):
+-        self.assertEqual(
+-            {
+-                "sites": ["1.1.1.1", "2.2.2.2"],
+-                "arbitrators": ["3.3.3.3"],
+-                "tickets": ["TA", "TB"],
+-            },
++            [
++                {"key": "site", "value": "1.1.1.1", "details": []},
++                {"key": "site", "value": "2.2.2.2", "details": []},
++                {"key": "arbitrator", "value": "3.3.3.3", "details": []},
++                {"key": "ticket", "value": "TA", "details": []},
++                {"key": "ticket", "value": "TB", "details": [
++                    {"key": "timeout", "value": "10", "details": []}
++                ]},
++            ],
+             config_exchange.to_exchange_format([
+                 config_structure.ConfigItem("site", "1.1.1.1"),
+                 config_structure.ConfigItem("site", "2.2.2.2"),
+diff --git a/pcs/lib/booth/test/test_config_files.py b/pcs/lib/booth/test/test_config_files.py
+index 2d4c3ea..8266cac 100644
+--- a/pcs/lib/booth/test/test_config_files.py
++++ b/pcs/lib/booth/test/test_config_files.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from os.path import join
++import os.path
+ from unittest import TestCase
+ 
+ from pcs.common import report_codes, env_file_role_codes as file_roles
+@@ -21,20 +21,38 @@ def patch_config_files(target, *args, **kwargs):
+         "pcs.lib.booth.config_files.{0}".format(target), *args, **kwargs
+     )
+ 
++@mock.patch("os.path.isdir")
+ @mock.patch("os.listdir")
+ @mock.patch("os.path.isfile")
+ class GetAllConfigsFileNamesTest(TestCase):
+-    def test_success(self, mock_is_file, mock_listdir):
++    def test_booth_config_dir_is_no_dir(
++        self, mock_is_file, mock_listdir, mock_isdir
++    ):
++        mock_isdir.return_value = False
++        self.assertEqual([], config_files.get_all_configs_file_names())
++        mock_isdir.assert_called_once_with(BOOTH_CONFIG_DIR)
++        self.assertEqual(0, mock_is_file.call_count)
++        self.assertEqual(0, mock_listdir.call_count)
++
++    def test_success(self, mock_is_file, mock_listdir, mock_isdir):
+         def mock_is_file_fn(file_name):
+-            if file_name in ["dir.cong", "dir"]:
++            if file_name in [
++                os.path.join(BOOTH_CONFIG_DIR, name)
++                for name in ("dir.cong", "dir")
++            ]:
+                 return False
+             elif file_name in [
+-                "name1", "name2.conf", "name.conf.conf", ".conf", "name3.conf"
++                os.path.join(BOOTH_CONFIG_DIR, name)
++                for name in (
++                    "name1", "name2.conf", "name.conf.conf", ".conf",
++                    "name3.conf"
++                )
+             ]:
+                 return True
+             else:
+                 raise AssertionError("unexpected input")
+ 
++        mock_isdir.return_value = True
+         mock_is_file.side_effect = mock_is_file_fn
+         mock_listdir.return_value = [
+             "name1", "name2.conf", "name.conf.conf", ".conf", "name3.conf",
+@@ -59,7 +77,7 @@ class ReadConfigTest(TestCase):
+ 
+         self.assertEqual(
+             [
+-                mock.call(join(BOOTH_CONFIG_DIR, "my-file.conf"), "r"),
++                mock.call(os.path.join(BOOTH_CONFIG_DIR, "my-file.conf"), "r"),
+                 mock.call().__enter__(),
+                 mock.call().read(),
+                 mock.call().__exit__(None, None, None)
+@@ -193,7 +211,7 @@ class ReadAuthfileTest(TestCase):
+         self.maxDiff = None
+ 
+     def test_success(self):
+-        path = join(BOOTH_CONFIG_DIR, "file.key")
++        path = os.path.join(BOOTH_CONFIG_DIR, "file.key")
+         mock_open = mock.mock_open(read_data="key")
+ 
+         with patch_config_files("open", mock_open, create=True):
+@@ -248,7 +266,7 @@ class ReadAuthfileTest(TestCase):
+ 
+     @patch_config_files("format_environment_error", return_value="reason")
+     def test_read_failure(self, _):
+-        path = join(BOOTH_CONFIG_DIR, "file.key")
++        path = os.path.join(BOOTH_CONFIG_DIR, "file.key")
+         mock_open = mock.mock_open()
+         mock_open().read.side_effect = EnvironmentError()
+ 
+diff --git a/pcs/lib/booth/test/test_config_parser.py b/pcs/lib/booth/test/test_config_parser.py
+index 684fc79..c04f451 100644
+--- a/pcs/lib/booth/test/test_config_parser.py
++++ b/pcs/lib/booth/test/test_config_parser.py
+@@ -24,6 +24,7 @@ class BuildTest(TestCase):
+                 'ticket = "TA"',
+                 'ticket = "TB"',
+                 "  timeout = 10",
++                "", #newline at the end
+             ]),
+             config_parser.build([
+                 ConfigItem("authfile", "/path/to/auth.file"),
+@@ -105,6 +106,7 @@ class ParseRawLinesTest(TestCase):
+                 "arbitrator=3.3.3.3",
+                 "syntactically_correct = nonsense",
+                 "line-with = hash#literal",
++                "",
+             ]))
+         )
+ 
+diff --git a/pcs/lib/booth/test/test_config_structure.py b/pcs/lib/booth/test/test_config_structure.py
+index 27faca5..1dd07cb 100644
+--- a/pcs/lib/booth/test/test_config_structure.py
++++ b/pcs/lib/booth/test/test_config_structure.py
+@@ -47,6 +47,46 @@ class ValidateTicketUniqueTest(TestCase):
+     def test_do_not_raises_when_no_duplicated_ticket(self):
+         config_structure.validate_ticket_unique([], "A")
+ 
++class ValidateTicketOptionsTest(TestCase):
++    def test_raises_on_invalid_options(self):
++        assert_raise_library_error(
++            lambda: config_structure.validate_ticket_options({
++                "site": "a",
++                "port": "b",
++                "timeout": " ",
++            }),
++            (
++                severities.ERROR,
++                report_codes.INVALID_OPTION,
++                {
++                    "option_name": "site",
++                    "option_type": "booth ticket",
++                    "allowed": list(config_structure.TICKET_KEYS),
++                },
++            ),
++            (
++                severities.ERROR,
++                report_codes.INVALID_OPTION,
++                {
++                    "option_name": "port",
++                    "option_type": "booth ticket",
++                    "allowed": list(config_structure.TICKET_KEYS),
++                },
++            ),
++            (
++                severities.ERROR,
++                report_codes.INVALID_OPTION_VALUE,
++                {
++                    "option_name": "timeout",
++                    "option_value": " ",
++                    "allowed_values": "no-empty",
++                },
++            ),
++        )
++
++    def test_success_on_valid_options(self):
++        config_structure.validate_ticket_options({"timeout": "10"})
++
+ class TicketExistsTest(TestCase):
+     def test_returns_true_if_ticket_in_structure(self):
+         self.assertTrue(config_structure.ticket_exists(
+@@ -183,10 +223,14 @@ class AddTicketTest(TestCase):
+             config_structure.ConfigItem("ticket", "some-ticket"),
+         ]
+         self.assertEqual(
+-            config_structure.add_ticket(configuration, "new-ticket"),
++            config_structure.add_ticket(configuration, "new-ticket", {
++                "timeout": "10",
++            }),
+             [
+                 config_structure.ConfigItem("ticket", "some-ticket"),
+-                config_structure.ConfigItem("ticket", "new-ticket"),
++                config_structure.ConfigItem("ticket", "new-ticket", [
++                    config_structure.ConfigItem("timeout", "10"),
++                ]),
+             ],
+         )
+ 
+@@ -222,3 +266,21 @@ class SetAuthfileTest(TestCase):
+                 "/path/to/auth.file"
+             )
+         )
++
++class TakePeersTest(TestCase):
++    def test_returns_site_list_and_arbitrators_list(self):
++        self.assertEqual(
++            (
++                ["1.1.1.1", "2.2.2.2", "3.3.3.3"],
++                ["4.4.4.4", "5.5.5.5"]
++            ),
++            config_structure.take_peers(
++                [
++                    config_structure.ConfigItem("site", "1.1.1.1"),
++                    config_structure.ConfigItem("site", "2.2.2.2"),
++                    config_structure.ConfigItem("site", "3.3.3.3"),
++                    config_structure.ConfigItem("arbitrator", "4.4.4.4"),
++                    config_structure.ConfigItem("arbitrator", "5.5.5.5"),
++                ],
++            )
++        )
+diff --git a/pcs/lib/booth/test/test_resource.py b/pcs/lib/booth/test/test_resource.py
+index 440ddde..dd72c1e 100644
+--- a/pcs/lib/booth/test/test_resource.py
++++ b/pcs/lib/booth/test/test_resource.py
+@@ -11,6 +11,7 @@ from lxml import etree
+ 
+ import pcs.lib.booth.resource as booth_resource
+ from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.misc import get_test_resource as rc
+ 
+ 
+ def fixture_resources_with_booth(booth_config_file_path):
+@@ -85,73 +86,24 @@ class FindBoothResourceElementsTest(TestCase):
+         )
+ 
+ class RemoveFromClusterTest(TestCase):
+-    def call(self, resources_section, remove_multiple=False):
++    def call(self, element_list):
+         mock_resource_remove = mock.Mock()
+-        num_of_removed_booth_resources = booth_resource.get_remover(
+-            mock_resource_remove
+-        )(
+-            resources_section,
+-            "/PATH/TO/CONF",
+-            remove_multiple,
+-        )
+-        return (
+-            mock_resource_remove,
+-            num_of_removed_booth_resources
+-        )
+-
+-    def fixture_resources_including_two_booths(self):
+-        resources_section = etree.fromstring('<resources/>')
+-        first = fixture_booth_element("first", "/PATH/TO/CONF")
+-        second = fixture_booth_element("second", "/PATH/TO/CONF")
+-        resources_section.append(first)
+-        resources_section.append(second)
+-        return resources_section
+-
+-    def test_raises_when_booth_resource_not_found(self):
+-        self.assertRaises(
+-            booth_resource.BoothNotFoundInCib,
+-            lambda: self.call(etree.fromstring('<resources/>')),
+-        )
+-
+-    def test_raises_when_more_booth_resources_found(self):
+-        resources_section = self.fixture_resources_including_two_booths()
+-        self.assertRaises(
+-            booth_resource.BoothMultipleOccurenceFoundInCib,
+-            lambda: self.call(resources_section),
+-        )
+-
+-    def test_returns_number_of_removed_elements(self):
+-        resources_section = self.fixture_resources_including_two_booths()
+-        mock_resource_remove, num_of_removed_booth_resources = self.call(
+-            resources_section,
+-            remove_multiple=True
+-        )
+-        self.assertEqual(num_of_removed_booth_resources, 2)
+-        self.assertEqual(
+-            mock_resource_remove.mock_calls, [
+-                mock.call('first'),
+-                mock.call('second'),
+-            ]
+-        )
++        booth_resource.get_remover(mock_resource_remove)(element_list)
++        return mock_resource_remove
+ 
+     def test_remove_ip_when_is_only_booth_sibling_in_group(self):
+-        resources_section = etree.fromstring('''
+-            <resources>
+-                <group>
+-                    <primitive id="ip" type="IPaddr2"/>
+-                    <primitive id="booth" type="booth-site">
+-                        <instance_attributes>
+-                            <nvpair name="config" value="/PATH/TO/CONF"/>
+-                        </instance_attributes>
+-                    </primitive>
+-                </group>
+-            </resources>
++        group = etree.fromstring('''
++            <group>
++                <primitive id="ip" type="IPaddr2"/>
++                <primitive id="booth" type="booth-site">
++                    <instance_attributes>
++                        <nvpair name="config" value="/PATH/TO/CONF"/>
++                    </instance_attributes>
++                </primitive>
++            </group>
+         ''')
+ 
+-        mock_resource_remove, _ = self.call(
+-            resources_section,
+-            remove_multiple=True
+-        )
++        mock_resource_remove = self.call(group.getchildren()[1:])
+         self.assertEqual(
+             mock_resource_remove.mock_calls, [
+                 mock.call('ip'),
+@@ -159,6 +111,41 @@ class RemoveFromClusterTest(TestCase):
+             ]
+         )
+ 
++class CreateInClusterTest(TestCase):
++    def test_remove_ip_when_booth_resource_add_failed(self):
++        mock_resource_create = mock.Mock(side_effect=[None, SystemExit(1)])
++        mock_resource_remove = mock.Mock()
++        mock_create_id = mock.Mock(side_effect=["ip_id","booth_id","group_id"])
++        ip = "1.2.3.4"
++        booth_config_file_path = rc("/path/to/booth.conf")
++
++        booth_resource.get_creator(mock_resource_create, mock_resource_remove)(
++            ip,
++            booth_config_file_path,
++            mock_create_id
++        )
++        self.assertEqual(mock_resource_create.mock_calls, [
++            mock.call(
++                clone_opts=[],
++                group=u'group_id',
++                meta_values=[],
++                op_values=[],
++                ra_id=u'ip_id',
++                ra_type=u'ocf:heartbeat:IPaddr2',
++                ra_values=[u'ip=1.2.3.4'],
++            ),
++            mock.call(
++                clone_opts=[],
++                group='group_id',
++                meta_values=[],
++                op_values=[],
++                ra_id='booth_id',
++                ra_type='ocf:pacemaker:booth-site',
++                ra_values=['config=/path/to/booth.conf'],
++            )
++        ])
++        mock_resource_remove.assert_called_once_with("ip_id")
++
+ 
+ class FindBindedIpTest(TestCase):
+     def fixture_resource_section(self, ip_element_list):
+diff --git a/pcs/lib/booth/test/test_sync.py b/pcs/lib/booth/test/test_sync.py
+index 58500cc..9ba6e80 100644
+--- a/pcs/lib/booth/test/test_sync.py
++++ b/pcs/lib/booth/test/test_sync.py
+@@ -74,7 +74,7 @@ class SetConfigOnNodeTest(TestCase):
+             self.mock_rep.report_item_list,
+             [(
+                 Severities.INFO,
+-                report_codes.BOOTH_CONFIGS_SAVED_ON_NODE,
++                report_codes.BOOTH_CONFIG_ACCEPTED_BY_NODE,
+                 {
+                     "node": self.node.label,
+                     "name": "cfg_name",
+@@ -104,7 +104,7 @@ class SetConfigOnNodeTest(TestCase):
+             self.mock_rep.report_item_list,
+             [(
+                 Severities.INFO,
+-                report_codes.BOOTH_CONFIGS_SAVED_ON_NODE,
++                report_codes.BOOTH_CONFIG_ACCEPTED_BY_NODE,
+                 {
+                     "node": self.node.label,
+                     "name": "cfg_name",
+@@ -175,8 +175,8 @@ class SyncConfigInCluster(TestCase):
+             self.mock_reporter.report_item_list,
+             [(
+                 Severities.INFO,
+-                report_codes.BOOTH_DISTRIBUTING_CONFIG,
+-                {"name": "cfg_name"}
++                report_codes.BOOTH_CONFIG_DISTRIBUTION_STARTED,
++                {}
+             )]
+         )
+ 
+@@ -213,8 +213,8 @@ class SyncConfigInCluster(TestCase):
+             self.mock_reporter.report_item_list,
+             [(
+                 Severities.INFO,
+-                report_codes.BOOTH_DISTRIBUTING_CONFIG,
+-                {"name": "cfg_name"}
++                report_codes.BOOTH_CONFIG_DISTRIBUTION_STARTED,
++                {}
+             )]
+         )
+ 
+@@ -252,8 +252,8 @@ class SyncConfigInCluster(TestCase):
+             self.mock_reporter.report_item_list,
+             [(
+                 Severities.INFO,
+-                report_codes.BOOTH_DISTRIBUTING_CONFIG,
+-                {"name": "cfg_name"}
++                report_codes.BOOTH_CONFIG_DISTRIBUTION_STARTED,
++                {}
+             )]
+         )
+ 
+@@ -375,12 +375,12 @@ class SendAllConfigToNodeTest(TestCase):
+             [
+                 (
+                     Severities.INFO,
+-                    report_codes.BOOTH_CONFIGS_SAVING_ON_NODE,
+-                    {"node": self.node.label}
++                    report_codes.BOOTH_CONFIG_DISTRIBUTION_STARTED,
++                    {}
+                 ),
+                 (
+                     Severities.INFO,
+-                    report_codes.BOOTH_CONFIGS_SAVED_ON_NODE,
++                    report_codes.BOOTH_CONFIG_ACCEPTED_BY_NODE,
+                     {
+                         "node": self.node.label,
+                         "name": "name1.conf, file1.key, name2.conf, file2.key",
+@@ -489,8 +489,8 @@ class SendAllConfigToNodeTest(TestCase):
+             [
+                 (
+                     Severities.INFO,
+-                    report_codes.BOOTH_CONFIGS_SAVING_ON_NODE,
+-                    {"node": self.node.label}
++                    report_codes.BOOTH_CONFIG_DISTRIBUTION_STARTED,
++                    {}
+                 ),
+                 (
+                     Severities.ERROR,
+@@ -593,8 +593,8 @@ class SendAllConfigToNodeTest(TestCase):
+             [
+                 (
+                     Severities.INFO,
+-                    report_codes.BOOTH_CONFIGS_SAVING_ON_NODE,
+-                    {"node": self.node.label}
++                    report_codes.BOOTH_CONFIG_DISTRIBUTION_STARTED,
++                    {}
+                 ),
+                 (
+                     Severities.WARNING,
+@@ -616,7 +616,7 @@ class SendAllConfigToNodeTest(TestCase):
+                 ),
+                 (
+                     Severities.INFO,
+-                    report_codes.BOOTH_CONFIGS_SAVED_ON_NODE,
++                    report_codes.BOOTH_CONFIG_ACCEPTED_BY_NODE,
+                     {
+                         "node": self.node.label,
+                         "name": "name2.conf, file2.key",
+@@ -652,7 +652,7 @@ class SendAllConfigToNodeTest(TestCase):
+             ),
+             (
+                 Severities.ERROR,
+-                report_codes.BOOTH_CONFIG_WRITE_ERROR,
++                report_codes.BOOTH_CONFIG_DISTRIBUTION_NODE_ERROR,
+                 {
+                     "node": self.node.label,
+                     "name": "name1.conf",
+@@ -661,7 +661,7 @@ class SendAllConfigToNodeTest(TestCase):
+             ),
+             (
+                 Severities.ERROR,
+-                report_codes.BOOTH_CONFIG_WRITE_ERROR,
++                report_codes.BOOTH_CONFIG_DISTRIBUTION_NODE_ERROR,
+                 {
+                     "node": self.node.label,
+                     "name": "file1.key",
+@@ -724,12 +724,12 @@ class SendAllConfigToNodeTest(TestCase):
+             [
+                 (
+                     Severities.INFO,
+-                    report_codes.BOOTH_CONFIGS_SAVING_ON_NODE,
+-                    {"node": self.node.label}
++                    report_codes.BOOTH_CONFIG_DISTRIBUTION_STARTED,
++                    {}
+                 ),
+                 (
+                     Severities.ERROR,
+-                    report_codes.BOOTH_CONFIG_WRITE_ERROR,
++                    report_codes.BOOTH_CONFIG_DISTRIBUTION_NODE_ERROR,
+                     {
+                         "node": self.node.label,
+                         "name": "name1.conf",
+@@ -738,7 +738,7 @@ class SendAllConfigToNodeTest(TestCase):
+                 ),
+                 (
+                     Severities.ERROR,
+-                    report_codes.BOOTH_CONFIG_WRITE_ERROR,
++                    report_codes.BOOTH_CONFIG_DISTRIBUTION_NODE_ERROR,
+                     {
+                         "node": self.node.label,
+                         "name": "file1.key",
+@@ -1058,12 +1058,12 @@ class SendAllConfigToNodeTest(TestCase):
+             [
+                 (
+                     Severities.INFO,
+-                    report_codes.BOOTH_CONFIGS_SAVING_ON_NODE,
+-                    {"node": self.node.label}
++                    report_codes.BOOTH_CONFIG_DISTRIBUTION_STARTED,
++                    {}
+                 ),
+                 (
+                     Severities.INFO,
+-                    report_codes.BOOTH_CONFIGS_SAVED_ON_NODE,
++                    report_codes.BOOTH_CONFIG_ACCEPTED_BY_NODE,
+                     {
+                         "node": self.node.label,
+                         "name": "name1.conf, name2.conf, file2.key",
+@@ -1143,8 +1143,8 @@ class SendAllConfigToNodeTest(TestCase):
+             [
+                 (
+                     Severities.INFO,
+-                    report_codes.BOOTH_CONFIGS_SAVING_ON_NODE,
+-                    {"node": self.node.label}
++                    report_codes.BOOTH_CONFIG_DISTRIBUTION_STARTED,
++                    {}
+                 ),
+                 (
+                     Severities.WARNING,
+@@ -1155,7 +1155,7 @@ class SendAllConfigToNodeTest(TestCase):
+                 ),
+                 (
+                     Severities.INFO,
+-                    report_codes.BOOTH_CONFIGS_SAVED_ON_NODE,
++                    report_codes.BOOTH_CONFIG_ACCEPTED_BY_NODE,
+                     {
+                         "node": self.node.label,
+                         "name": "name2.conf, file2.key",
+diff --git a/pcs/lib/commands/booth.py b/pcs/lib/commands/booth.py
+index 43ea9dd..7a3d348 100644
+--- a/pcs/lib/commands/booth.py
++++ b/pcs/lib/commands/booth.py
+@@ -34,11 +34,10 @@ def config_setup(env, booth_configuration, overwrite_existing=False):
+     list arbitrator_list contains arbitrator adresses of multisite
+     """
+ 
++    config_content = config_exchange.from_exchange_format(booth_configuration)
+     config_structure.validate_peers(
+-        booth_configuration.get("sites", []),
+-        booth_configuration.get("arbitrators", [])
++        *config_structure.take_peers(config_content)
+     )
+-    config_content = config_exchange.from_exchange_format(booth_configuration)
+ 
+     env.booth.create_key(config_files.generate_key(), overwrite_existing)
+     config_content = config_structure.set_authfile(
+@@ -99,21 +98,34 @@ def config_destroy(env, ignore_config_load_problems=False):
+         env.booth.remove_key()
+     env.booth.remove_config()
+ 
+-def config_show(env):
++
++def config_text(env, name, node_name=None):
+     """
+-    return configuration as tuple of sites list and arbitrators list
++    get configuration in raw format
++    string name -- name of booth instance whose config should be returned
++    string node_name -- get the config from specified node or local host if None
+     """
+-    return config_exchange.to_exchange_format(
+-        parse(env.booth.get_config_content())
++    if node_name is None:
++        # TODO add name support
++        return env.booth.get_config_content()
++
++    remote_data = sync.pull_config_from_node(
++        env.node_communicator(), NodeAddresses(node_name), name
+     )
++    try:
++        return remote_data["config"]["data"]
++    except KeyError:
++        raise LibraryError(reports.invalid_response_format(node_name))
+ 
+-def config_ticket_add(env, ticket_name):
++
++def config_ticket_add(env, ticket_name, options):
+     """
+     add ticket to booth configuration
+     """
+     booth_configuration = config_structure.add_ticket(
+         parse(env.booth.get_config_content()),
+-        ticket_name
++        ticket_name,
++        options,
+     )
+     env.booth.push_config(build(booth_configuration))
+ 
+@@ -127,7 +139,7 @@ def config_ticket_remove(env, ticket_name):
+     )
+     env.booth.push_config(build(booth_configuration))
+ 
+-def create_in_cluster(env, name, ip, resource_create):
++def create_in_cluster(env, name, ip, resource_create, resource_remove):
+     #TODO resource_create is provisional hack until resources are not moved to
+     #lib
+     resources_section = get_resources(env.get_cib())
+@@ -136,7 +148,7 @@ def create_in_cluster(env, name, ip, resource_create):
+     if resource.find_for_config(resources_section, booth_config_file_path):
+         raise LibraryError(booth_reports.booth_already_in_cib(name))
+ 
+-    resource.get_creator(resource_create)(
++    resource.get_creator(resource_create, resource_remove)(
+         ip,
+         booth_config_file_path,
+         create_id = partial(
+@@ -146,25 +158,20 @@ def create_in_cluster(env, name, ip, resource_create):
+         )
+     )
+ 
+-def remove_from_cluster(env, name, resource_remove):
++def remove_from_cluster(env, name, resource_remove, allow_remove_multiple):
+     #TODO resource_remove is provisional hack until resources are not moved to
+     #lib
+-    try:
+-        num_of_removed_booth_resources = resource.get_remover(resource_remove)(
+-            get_resources(env.get_cib()),
+-            get_config_file_name(name),
+-        )
+-        if num_of_removed_booth_resources > 1:
+-            env.report_processor.process(
+-                booth_reports.booth_multiple_times_in_cib(
+-                    name,
+-                    severity=ReportItemSeverity.WARNING,
+-                )
+-            )
+-    except resource.BoothNotFoundInCib:
+-        raise LibraryError(booth_reports.booth_not_exists_in_cib(name))
+-    except resource.BoothMultipleOccurenceFoundInCib:
+-        raise LibraryError(booth_reports.booth_multiple_times_in_cib(name))
++    resource.get_remover(resource_remove)(
++        _find_resource_elements_for_operation(env, name, allow_remove_multiple)
++    )
++
++def restart(env, name, resource_restart, allow_multiple):
++    #TODO resource_restart is provisional hack until resources are not moved to
++    #lib
++    for booth_element in _find_resource_elements_for_operation(
++        env, name, allow_multiple
++    ):
++        resource_restart([booth_element.attrib["id"]])
+ 
+ def ticket_operation(operation, env, name, ticket, site_ip):
+     if not site_ip:
+@@ -314,7 +321,7 @@ def pull_config(env, node_name, name):
+     name -- string, name of booth instance of which config should be fetched
+     """
+     env.report_processor.process(
+-        booth_reports.booth_fetching_config_from_node(node_name, name)
++        booth_reports.booth_fetching_config_from_node_started(node_name, name)
+     )
+     output = sync.pull_config_from_node(
+         env.node_communicator(), NodeAddresses(node_name), name
+@@ -335,7 +342,7 @@ def pull_config(env, node_name, name):
+                 True
+             )
+         env.report_processor.process(
+-            booth_reports.booth_config_saved(name_list=[name])
++            booth_reports.booth_config_accepted_by_node(name_list=[name])
+         )
+     except KeyError:
+         raise LibraryError(reports.invalid_response_format(node_name))
+@@ -347,3 +354,24 @@ def get_status(env, name=None):
+         "ticket": status.get_tickets_status(env.cmd_runner(), name),
+         "peers": status.get_peers_status(env.cmd_runner(), name),
+     }
++
++def _find_resource_elements_for_operation(env, name, allow_multiple):
++    booth_element_list = resource.find_for_config(
++        get_resources(env.get_cib()),
++        get_config_file_name(name),
++    )
++
++    if not booth_element_list:
++        raise LibraryError(booth_reports.booth_not_exists_in_cib(name))
++
++    if len(booth_element_list) > 1:
++        if not allow_multiple:
++            raise LibraryError(booth_reports.booth_multiple_times_in_cib(name))
++        env.report_processor.process(
++            booth_reports.booth_multiple_times_in_cib(
++                name,
++                severity=ReportItemSeverity.WARNING,
++            )
++        )
++
++    return booth_element_list
+diff --git a/pcs/lib/commands/test/test_booth.py b/pcs/lib/commands/test/test_booth.py
+index 20bf06a..d2429b6 100644
+--- a/pcs/lib/commands/test/test_booth.py
++++ b/pcs/lib/commands/test/test_booth.py
+@@ -19,7 +19,6 @@ from pcs.test.tools.assertions import (
+ 
+ from pcs import settings
+ from pcs.common import report_codes
+-from pcs.lib.booth import resource as booth_resource
+ from pcs.lib.env import LibraryEnvironment
+ from pcs.lib.node import NodeAddresses
+ from pcs.lib.errors import LibraryError, ReportItemSeverity as Severities
+@@ -48,10 +47,10 @@ class ConfigSetupTest(TestCase):
+         env = mock.MagicMock()
+         commands.config_setup(
+             env,
+-            booth_configuration={
+-                "sites": ["1.1.1.1"],
+-                "arbitrators": ["2.2.2.2"],
+-            },
++            booth_configuration=[
++                {"key": "site", "value": "1.1.1.1", "details": []},
++                {"key": "arbitrator", "value": "2.2.2.2", "details": []},
++            ],
+         )
+         env.booth.create_config.assert_called_once_with(
+             "config content",
+@@ -426,7 +425,7 @@ class PullConfigTest(TestCase):
+                 ),
+                 (
+                     Severities.INFO,
+-                    report_codes.BOOTH_CONFIGS_SAVED_ON_NODE,
++                    report_codes.BOOTH_CONFIG_ACCEPTED_BY_NODE,
+                     {
+                         "node": None,
+                         "name": "name",
+@@ -467,7 +466,7 @@ class PullConfigTest(TestCase):
+                 ),
+                 (
+                     Severities.INFO,
+-                    report_codes.BOOTH_CONFIGS_SAVED_ON_NODE,
++                    report_codes.BOOTH_CONFIG_ACCEPTED_BY_NODE,
+                     {
+                         "node": None,
+                         "name": "name",
+@@ -548,7 +547,8 @@ class CreateInClusterTest(TestCase):
+     def test_raises_when_is_created_already(self):
+         assert_raise_library_error(
+             lambda: commands.create_in_cluster(
+-                mock.MagicMock(), "somename", ip="1.2.3.4", resource_create=None
++                mock.MagicMock(), "somename", ip="1.2.3.4",
++                resource_create=None, resource_remove=None,
+             ),
+             (
+                 Severities.ERROR,
+@@ -559,14 +559,14 @@ class CreateInClusterTest(TestCase):
+             ),
+         )
+ 
+-class RemoveFromClusterTest(TestCase):
+-    @patch_commands("resource.get_remover", mock.Mock(return_value = mock.Mock(
+-        side_effect=booth_resource.BoothNotFoundInCib()
+-    )))
++class FindResourceElementsForOperationTest(TestCase):
++    @patch_commands("resource.find_for_config", mock.Mock(return_value=[]))
+     def test_raises_when_no_booth_resource_found(self):
+         assert_raise_library_error(
+-            lambda: commands.remove_from_cluster(
+-                mock.MagicMock(), "somename", resource_remove=None
++            lambda: commands._find_resource_elements_for_operation(
++                mock.MagicMock(),
++                "somename",
++                allow_multiple=False
+             ),
+             (
+                 Severities.ERROR,
+@@ -577,13 +577,15 @@ class RemoveFromClusterTest(TestCase):
+             ),
+         )
+ 
+-    @patch_commands("resource.get_remover", mock.Mock(return_value = mock.Mock(
+-        side_effect=booth_resource.BoothMultipleOccurenceFoundInCib()
+-    )))
++    @patch_commands(
++        "resource.find_for_config", mock.Mock(return_value=["b_el1", "b_el2"])
++    )
+     def test_raises_when_multiple_booth_resource_found(self):
+         assert_raise_library_error(
+-            lambda: commands.remove_from_cluster(
+-                mock.MagicMock(), "somename", resource_remove=None
++            lambda: commands._find_resource_elements_for_operation(
++                mock.MagicMock(),
++                "somename",
++                allow_multiple=False
+             ),
+             (
+                 Severities.ERROR,
+@@ -595,15 +597,15 @@ class RemoveFromClusterTest(TestCase):
+             ),
+         )
+ 
+-    @patch_commands("resource.get_remover", mock.Mock(return_value = mock.Mock(
+-        return_value=2
+-    )))
++    @patch_commands("get_resources", mock.Mock(return_value="resources"))
++    @patch_commands("resource.get_remover", mock.MagicMock())
++    @patch_commands("resource.find_for_config", mock.Mock(return_value=[1, 2]))
+     def test_warn_when_multiple_booth_resources_removed(self):
+         report_processor=MockLibraryReportProcessor()
+-        commands.remove_from_cluster(
++        commands._find_resource_elements_for_operation(
+             mock.MagicMock(report_processor=report_processor),
+             "somename",
+-            resource_remove=None
++            allow_multiple=True,
+         )
+         assert_report_item_list_equal(report_processor.report_item_list, [(
+             Severities.WARNING,
+diff --git a/pcs/pcs.8 b/pcs/pcs.8
+index b3c4877..270ad2d 100644
+--- a/pcs/pcs.8
++++ b/pcs/pcs.8
+@@ -590,8 +590,8 @@ Add new ticket to the current configuration.
+ ticket remove <ticket>
+ Remove the specified ticket from the current configuration.
+ .TP
+-config
+-Show booth configuration.
++config [<node>]
++Show booth configuration from the specified node or from the current node if node not specified.
+ .TP
+ create ip <address>
+ Make the cluster run booth service on the specified ip address as a cluster resource.  Typically this is used to run booth site.
+@@ -599,11 +599,14 @@ Make the cluster run booth service on the specified ip address as a cluster reso
+ remove
+ Remove booth resources created by the "pcs booth create" command.
+ .TP
++restart
++Restart booth resources created by the "pcs booth create" command.
++.TP
+ ticket grant <ticket> [<site address>]
+-Grant the ticket for the site specified by address.  Site address which has been specified with 'pcs booth create' command is used if 'site address' is omitted.
++Grant the ticket for the site specified by address.  Site address which has been specified with 'pcs booth create' command is used if 'site address' is omitted. Cannot be run on an arbitrator.
+ .TP
+ ticket revoke <ticket> [<site address>]
+-Revoke the ticket for the site specified by address.  Site address which has been specified with 'pcs booth create' command is used if 'site address' is omitted.
++Revoke the ticket for the site specified by address.  Site address which has been specified with 'pcs booth create' command is used if 'site address' is omitted. Cannot be run on an arbitrator.
+ .TP
+ status
+ Print current status of booth on the local node.
+diff --git a/pcs/test/test_booth.py b/pcs/test/test_booth.py
+index 5ddc06d..3356e71 100644
+--- a/pcs/test/test_booth.py
++++ b/pcs/test/test_booth.py
+@@ -76,10 +76,10 @@ class SetupTest(BoothMixin, unittest.TestCase):
+         self.assert_pcs_success(
+             "booth config",
+             stdout_full=console_report(
++                "authfile = {0}".format(BOOTH_KEY_FILE),
+                 "site = 1.1.1.1",
+                 "site = 2.2.2.2",
+                 "arbitrator = 3.3.3.3",
+-                "authfile = {0}".format(BOOTH_KEY_FILE),
+             )
+         )
+         with open(BOOTH_KEY_FILE) as key_file:
+@@ -187,13 +187,14 @@ class BoothTest(unittest.TestCase, BoothMixin):
+ 
+ class AddTicketTest(BoothTest):
+     def test_success_add_ticket(self):
+-        self.assert_pcs_success("booth ticket add TicketA")
++        self.assert_pcs_success("booth ticket add TicketA expire=10")
+         self.assert_pcs_success("booth config", stdout_full=console_report(
++            "authfile = {0}".format(BOOTH_KEY_FILE),
+             "site = 1.1.1.1",
+             "site = 2.2.2.2",
+             "arbitrator = 3.3.3.3",
+-            "authfile = {0}".format(BOOTH_KEY_FILE),
+             'ticket = "TicketA"',
++            "  expire = 10",
+         ))
+ 
+     def test_fail_on_bad_ticket_name(self):
+@@ -211,22 +212,33 @@ class AddTicketTest(BoothTest):
+             "\n"
+         )
+ 
++    def test_fail_on_invalid_options(self):
++        self.assert_pcs_fail(
++            "booth ticket add TicketA site=a timeout=", console_report(
++                "Error: invalid booth ticket option 'site', allowed options"
++                    " are: acquire-after, attr-prereq, before-acquire-handler,"
++                    " expire, renewal-freq, retries, timeout, weights"
++                ,
++                "Error: '' is not a valid timeout value, use no-empty",
++            )
++        )
++
+ class RemoveTicketTest(BoothTest):
+     def test_success_remove_ticket(self):
+         self.assert_pcs_success("booth ticket add TicketA")
+         self.assert_pcs_success("booth config", stdout_full=console_report(
++            "authfile = {0}".format(BOOTH_KEY_FILE),
+             "site = 1.1.1.1",
+             "site = 2.2.2.2",
+             "arbitrator = 3.3.3.3",
+-            "authfile = {0}".format(BOOTH_KEY_FILE),
+             'ticket = "TicketA"',
+         ))
+         self.assert_pcs_success("booth ticket remove TicketA")
+         self.assert_pcs_success("booth config", stdout_full=console_report(
++            "authfile = {0}".format(BOOTH_KEY_FILE),
+             "site = 1.1.1.1",
+             "site = 2.2.2.2",
+             "arbitrator = 3.3.3.3",
+-            "authfile = {0}".format(BOOTH_KEY_FILE),
+         ))
+ 
+     def test_fail_when_ticket_does_not_exist(self):
+@@ -286,7 +298,6 @@ class RemoveTest(BoothTest):
+             " --force to override"
+         ])
+ 
+-
+     def test_remove_added_booth_configuration(self):
+         self.assert_pcs_success("resource show", "NO resources configured\n")
+         self.assert_pcs_success("booth create ip 192.168.122.120")
+@@ -301,8 +312,27 @@ class RemoveTest(BoothTest):
+         ])
+         self.assert_pcs_success("resource show", "NO resources configured\n")
+ 
+-    def test_fail_when_booth_is_not_currently_configured(self):
+-        pass
++
++    def test_remove_multiple_booth_configuration(self):
++        self.assert_pcs_success("resource show", "NO resources configured\n")
++        self.assert_pcs_success("booth create ip 192.168.122.120")
++        self.assert_pcs_success(
++            "resource create some-id ocf:pacemaker:booth-site"
++            " config=/etc/booth/booth.conf"
++        )
++        self.assert_pcs_success("resource show", [
++             " Resource Group: booth-booth-group",
++             "     booth-booth-ip	(ocf::heartbeat:IPaddr2):	Stopped",
++             "     booth-booth-service	(ocf::pacemaker:booth-site):	Stopped",
++             " some-id	(ocf::pacemaker:booth-site):	Stopped",
++        ])
++        self.assert_pcs_success("booth remove --force", [
++            "Warning: found more than one booth instance 'booth' in cib",
++            "Deleting Resource - booth-booth-ip",
++            "Deleting Resource (and group) - booth-booth-service",
++            "Deleting Resource - some-id",
++        ])
++
+ 
+ class TicketGrantTest(BoothTest):
+     def test_failed_when_implicit_site_but_not_correct_confgiuration_in_cib(
+@@ -332,6 +362,7 @@ class ConfigTest(unittest.TestCase, BoothMixin):
+     def setUp(self):
+         shutil.copy(EMPTY_CIB, TEMP_CIB)
+         self.pcs_runner = PcsRunner(TEMP_CIB)
++
+     def test_fail_when_config_file_do_not_exists(self):
+         ensure_booth_config_not_exists()
+         self.assert_pcs_fail(
+@@ -340,3 +371,33 @@ class ConfigTest(unittest.TestCase, BoothMixin):
+                 BOOTH_CONFIG_FILE
+             )
+         )
++
++    def test_too_much_args(self):
++        self.assert_pcs_fail(
++            "booth config nodename surplus",
++            stdout_start="\nUsage: pcs booth <command>\n    config ["
++        )
++
++    def test_show_unsupported_values(self):
++        ensure_booth_config_not_exists()
++        self.assert_pcs_success(
++            "booth setup sites 1.1.1.1 2.2.2.2 arbitrators 3.3.3.3"
++        )
++        with open(BOOTH_CONFIG_FILE, "a") as config_file:
++            config_file.write("some = nonsense")
++        self.assert_pcs_success("booth ticket add TicketA")
++        with open(BOOTH_CONFIG_FILE, "a") as config_file:
++            config_file.write("another = nonsense")
++
++        self.assert_pcs_success(
++            "booth config",
++            stdout_full="\n".join((
++                "authfile = {0}".format(BOOTH_KEY_FILE),
++                "site = 1.1.1.1",
++                "site = 2.2.2.2",
++                "arbitrator = 3.3.3.3",
++                "some = nonsense",
++                'ticket = "TicketA"',
++                "another = nonsense",
++            ))
++        )
+diff --git a/pcs/usage.py b/pcs/usage.py
+index 78e340b..088dec9 100644
+--- a/pcs/usage.py
++++ b/pcs/usage.py
+@@ -118,6 +118,7 @@ def generate_completion_tree_from_usage():
+     tree["pcsd"] = generate_tree(pcsd([],False))
+     tree["node"] = generate_tree(node([], False))
+     tree["alert"] = generate_tree(alert([], False))
++    tree["booth"] = generate_tree(booth([], False))
+     return tree
+ 
+ def generate_tree(usage_txt):
+@@ -1438,8 +1439,9 @@ Commands:
+     ticket remove <ticket>
+         Remove the specified ticket from the current configuration.
+ 
+-    config
+-        Show booth configuration.
++    config [<node>]
++        Show booth configuration from the specified node or from the current
++        node if node not specified.
+ 
+     create ip <address>
+         Make the cluster run booth service on the specified ip address as
+@@ -1448,15 +1450,18 @@ Commands:
+     remove
+         Remove booth resources created by the "pcs booth create" command.
+ 
++    restart
++        Restart booth resources created by the "pcs booth create" command.
++
+     ticket grant <ticket> [<site address>]
+         Grant the ticket for the site specified by address.  Site address which
+         has been specified with 'pcs booth create' command is used if
+-        'site address' is omitted.
++        'site address' is omitted. Cannot be run on an arbitrator.
+ 
+     ticket revoke <ticket> [<site address>]
+         Revoke the ticket for the site specified by address.  Site address which
+         has been specified with 'pcs booth create' command is used if
+-        'site address' is omitted.
++        'site address' is omitted. Cannot be run on an arbitrator.
+ 
+     status
+         Print current status of booth on the local node.
+-- 
+1.8.3.1
+

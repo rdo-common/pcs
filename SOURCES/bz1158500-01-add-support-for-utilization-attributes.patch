@@ -1,0 +1,357 @@
+From 1b6ed4d97198e7ca8c1fd5f76bfb8bfc95eeabdc Mon Sep 17 00:00:00 2001
+From: Ivan Devat <idevat@redhat.com>
+Date: Wed, 14 Sep 2016 09:37:06 +0200
+Subject: [PATCH] squash bz1158500 add support for utilization attri
+
+4ab84628f802 fix parsing of utilization attributes
+
+18d526f59679 support utilization on (non-cib) remote node
+
+f0b193a681e3 show error when show utilizat. on nonexistent node
+
+9907c123c225 web UI: fix setting utilization attributes
+---
+ .pylintrc                     |  2 +-
+ pcs/node.py                   | 54 ++++++++++++++++++++++++++++++++++++-----
+ pcs/resource.py               |  8 ++++---
+ pcs/test/test_node.py         | 56 +++++++++++++++++++++++++++++++++++++++++++
+ pcs/test/test_resource.py     | 18 ++++++++++++++
+ pcs/test/test_utils.py        | 17 +++++++++----
+ pcs/utils.py                  | 12 +++++++++-
+ pcsd/public/js/nodes-ember.js |  4 ++--
+ pcsd/remote.rb                |  2 +-
+ 9 files changed, 155 insertions(+), 18 deletions(-)
+
+diff --git a/.pylintrc b/.pylintrc
+index 1dd6d5d..6101381 100644
+--- a/.pylintrc
++++ b/.pylintrc
+@@ -92,7 +92,7 @@ dummy-variables-rgx=_$|dummy
+ 
+ [FORMAT]
+ # Maximum number of lines in a module
+-max-module-lines=4584
++max-module-lines=4616
+ # Maximum number of characters on a single line.
+ max-line-length=1291
+ 
+diff --git a/pcs/node.py b/pcs/node.py
+index ed77d5d..729ea35 100644
+--- a/pcs/node.py
++++ b/pcs/node.py
+@@ -56,7 +56,10 @@ def node_cmd(argv):
+         elif len(argv) == 1:
+             print_node_utilization(argv.pop(0), filter_name=filter_name)
+         else:
+-            set_node_utilization(argv.pop(0), argv)
++            try:
++                set_node_utilization(argv.pop(0), argv)
++            except CmdLineInputError as e:
++                utils.exit_on_cmdline_input_errror(e, "node", "utilization")
+     # pcs-to-pcsd use only
+     elif sub_cmd == "pacemaker-status":
+         node_pacemaker_status()
+@@ -150,17 +153,56 @@ def set_node_utilization(node, argv):
+     cib = utils.get_cib_dom()
+     node_el = utils.dom_get_node(cib, node)
+     if node_el is None:
+-        utils.err("Unable to find a node: {0}".format(node))
++        if utils.usefile:
++            utils.err("Unable to find a node: {0}".format(node))
+ 
+-    utils.dom_update_utilization(
+-        node_el, utils.convert_args_to_tuples(argv), "nodes-"
+-    )
++        for attrs in utils.getNodeAttributesFromPacemaker():
++            if attrs.name == node and attrs.type == "remote":
++                node_attrs = attrs
++                break
++        else:
++            utils.err("Unable to find a node: {0}".format(node))
++
++        nodes_section_list = cib.getElementsByTagName("nodes")
++        if len(nodes_section_list) == 0:
++            utils.err("Unable to get nodes section of cib")
++
++        dom = nodes_section_list[0].ownerDocument
++        node_el = dom.createElement("node")
++        node_el.setAttribute("id", node_attrs.id)
++        node_el.setAttribute("type", node_attrs.type)
++        node_el.setAttribute("uname", node_attrs.name)
++        nodes_section_list[0].appendChild(node_el)
++
++    utils.dom_update_utilization(node_el, prepare_options(argv), "nodes-")
+     utils.replace_cib_configuration(cib)
+ 
+ def print_node_utilization(filter_node=None, filter_name=None):
+     cib = utils.get_cib_dom()
++
++    node_element_list = cib.getElementsByTagName("node")
++
++
++    if(
++        filter_node
++        and
++        filter_node not in [
++            node_element.getAttribute("uname")
++            for node_element in node_element_list
++        ]
++        and (
++            utils.usefile
++            or
++            filter_node not in [
++                node_attrs.name for node_attrs
++                in utils.getNodeAttributesFromPacemaker()
++            ]
++        )
++    ):
++        utils.err("Unable to find a node: {0}".format(filter_node))
++
+     utilization = {}
+-    for node_el in cib.getElementsByTagName("node"):
++    for node_el in node_element_list:
+         node = node_el.getAttribute("uname")
+         if filter_node is not None and node != filter_node:
+             continue
+diff --git a/pcs/resource.py b/pcs/resource.py
+index 74adac6..046a826 100644
+--- a/pcs/resource.py
++++ b/pcs/resource.py
+@@ -191,7 +191,10 @@ def resource_cmd(argv):
+         elif len(argv) == 1:
+             print_resource_utilization(argv.pop(0))
+         else:
+-            set_resource_utilization(argv.pop(0), argv)
++            try:
++                set_resource_utilization(argv.pop(0), argv)
++            except CmdLineInputError as e:
++                utils.exit_on_cmdline_input_errror(e, "resource", "utilization")
+     elif (sub_cmd == "get_resource_agent_info"):
+         get_resource_agent_info(argv)
+     else:
+@@ -2795,8 +2798,7 @@ def set_resource_utilization(resource_id, argv):
+     resource_el = utils.dom_get_resource(cib, resource_id)
+     if resource_el is None:
+         utils.err("Unable to find a resource: {0}".format(resource_id))
+-
+-    utils.dom_update_utilization(resource_el, utils.convert_args_to_tuples(argv))
++    utils.dom_update_utilization(resource_el, prepare_options(argv))
+     utils.replace_cib_configuration(cib)
+ 
+ def print_resource_utilization(resource_id):
+diff --git a/pcs/test/test_node.py b/pcs/test/test_node.py
+index 9b45e07..137c7c7 100644
+--- a/pcs/test/test_node.py
++++ b/pcs/test/test_node.py
+@@ -7,7 +7,9 @@ from __future__ import (
+ 
+ import shutil
+ from pcs.test.tools import pcs_unittest as unittest
++from pcs.test.tools.pcs_unittest import mock
+ 
++from pcs import node
+ from pcs.test.tools.assertions import AssertPcsMixin
+ from pcs.test.tools.misc import (
+     ac,
+@@ -268,6 +270,20 @@ Node Utilization:
+         self.assertEqual(0, returnVal)
+ 
+     def test_node_utilization_set_invalid(self):
++        output, returnVal = pcs(temp_cib, "node utilization rh7-1 test")
++        expected_out = """\
++Error: missing value of 'test' option
++"""
++        ac(expected_out, output)
++        self.assertEqual(1, returnVal)
++
++        output, returnVal = pcs(temp_cib, "node utilization rh7-1 =10")
++        expected_out = """\
++Error: missing key in '=10' option
++"""
++        ac(expected_out, output)
++        self.assertEqual(1, returnVal)
++
+         output, returnVal = pcs(temp_cib, "node utilization rh7-0 test=10")
+         expected_out = """\
+ Error: Unable to find a node: rh7-0
+@@ -524,3 +540,43 @@ Node Attributes:
+             "node attribute rh7-1 missing= --force",
+             ""
+         )
++
++class SetNodeUtilizationTest(unittest.TestCase, AssertPcsMixin):
++    def setUp(self):
++        shutil.copy(empty_cib, temp_cib)
++        self.pcs_runner = PcsRunner(temp_cib)
++
++    def test_refuse_non_option_attribute_parameter_among_options(self):
++        self.assert_pcs_fail("node utilization rh7-1 net", [
++            "Error: missing value of 'net' option",
++        ])
++
++    def test_refuse_option_without_key(self):
++        self.assert_pcs_fail("node utilization rh7-1 =1", [
++            "Error: missing key in '=1' option",
++        ])
++
++class PrintNodeUtilizationTest(unittest.TestCase, AssertPcsMixin):
++    def setUp(self):
++        shutil.copy(empty_cib, temp_cib)
++        self.pcs_runner = PcsRunner(temp_cib)
++
++    @mock.patch("pcs.node.utils")
++    def test_refuse_when_node_not_in_cib_and_is_not_remote(self, mock_utils):
++        mock_cib = mock.MagicMock()
++        mock_cib.getElementsByTagName = mock.Mock(return_value=[])
++
++        mock_utils.get_cib_dom = mock.Mock(return_value=mock_cib)
++        mock_utils.usefile = False
++        mock_utils.getNodeAttributesFromPacemaker = mock.Mock(return_value=[])
++        mock_utils.err = mock.Mock(side_effect=SystemExit)
++
++        self.assertRaises(
++            SystemExit,
++            lambda: node.print_node_utilization("some")
++        )
++
++    def test_refuse_when_node_not_in_mocked_cib(self):
++        self.assert_pcs_fail("node utilization some_nonexistent_node", [
++            "Error: Unable to find a node: some_nonexistent_node",
++        ])
+diff --git a/pcs/test/test_resource.py b/pcs/test/test_resource.py
+index 87a7fa8..d32cfb4 100644
+--- a/pcs/test/test_resource.py
++++ b/pcs/test/test_resource.py
+@@ -4430,6 +4430,24 @@ Resource Utilization:
+         self.assertEqual(0, returnVal)
+ 
+     def test_resource_utilization_set_invalid(self):
++        output, returnVal = pcs(
++            temp_large_cib, "resource utilization dummy test"
++        )
++        expected_out = """\
++Error: missing value of 'test' option
++"""
++        ac(expected_out, output)
++        self.assertEqual(1, returnVal)
++
++        output, returnVal = pcs(
++            temp_large_cib, "resource utilization dummy =10"
++        )
++        expected_out = """\
++Error: missing key in '=10' option
++"""
++        ac(expected_out, output)
++        self.assertEqual(1, returnVal)
++
+         output, returnVal = pcs(temp_large_cib, "resource utilization dummy0")
+         expected_out = """\
+ Error: Unable to find a resource: dummy0
+diff --git a/pcs/test/test_utils.py b/pcs/test/test_utils.py
+index 252de30..c4c6d87 100644
+--- a/pcs/test/test_utils.py
++++ b/pcs/test/test_utils.py
+@@ -1400,12 +1400,12 @@ class UtilsTest(unittest.TestCase):
+         """).documentElement
+         self.assertRaises(
+             SystemExit,
+-            utils.dom_update_utilization, el, [("name", "invalid_val")]
++            utils.dom_update_utilization, el, {"name": "invalid_val"}
+         )
+ 
+         self.assertRaises(
+             SystemExit,
+-            utils.dom_update_utilization, el, [("name", "0.01")]
++            utils.dom_update_utilization, el, {"name": "0.01"}
+         )
+ 
+         sys.stderr = tmp_stderr
+@@ -1415,7 +1415,12 @@ class UtilsTest(unittest.TestCase):
+         <resource id="test_id"/>
+         """).documentElement
+         utils.dom_update_utilization(
+-            el, [("name", ""), ("key", "-1"), ("keys", "90")]
++            el,
++            {
++                "name": "",
++                "key": "-1",
++                "keys": "90",
++            }
+         )
+ 
+         self.assertEqual(len(dom_get_child_elements(el)), 1)
+@@ -1459,7 +1464,11 @@ class UtilsTest(unittest.TestCase):
+         </resource>
+         """).documentElement
+         utils.dom_update_utilization(
+-            el, [("key", "100"), ("keys", "")]
++            el,
++            {
++                "key": "100",
++                "keys": "",
++            }
+         )
+ 
+         u = dom_get_child_elements(el)[0]
+diff --git a/pcs/utils.py b/pcs/utils.py
+index a7ff7ca..d5b6dcf 100644
+--- a/pcs/utils.py
++++ b/pcs/utils.py
+@@ -472,6 +472,16 @@ def getNodesFromPacemaker():
+     except LibraryError as e:
+         process_library_reports(e.args)
+ 
++def getNodeAttributesFromPacemaker():
++    try:
++        return [
++            node.attrs
++            for node in ClusterState(getClusterStateXml()).node_section.nodes
++        ]
++    except LibraryError as e:
++        process_library_reports(e.args)
++
++
+ def hasCorosyncConf(conf=None):
+     if not conf:
+         if is_rhel6():
+@@ -2487,7 +2497,7 @@ def dom_update_utilization(dom_element, attributes, id_prefix=""):
+         id_prefix + dom_element.getAttribute("id") + "-utilization"
+     )
+ 
+-    for name, value in attributes:
++    for name, value in sorted(attributes.items()):
+         if value != "" and not is_int(value):
+             err(
+                 "Value of utilization attribute must be integer: "
+diff --git a/pcsd/public/js/nodes-ember.js b/pcsd/public/js/nodes-ember.js
+index c650fe6..19caf14 100644
+--- a/pcsd/public/js/nodes-ember.js
++++ b/pcsd/public/js/nodes-ember.js
+@@ -500,9 +500,9 @@ Pcs.UtilizationTableComponent = Ember.Component.extend({
+     },
+     add: function(form_id) {
+       var id = "#" + form_id;
+-      var name = $(id + " input[name='new_utilization_name']").val();
++      var name = $(id + " input[name='new_utilization_name']").val().trim();
+       if (name == "") {
+-        return;
++        alert("Name of utilization attribute should be non-empty string.");
+       }
+       var value = $(id + " input[name='new_utilization_value']").val().trim();
+       if (!is_integer(value)) {
+diff --git a/pcsd/remote.rb b/pcsd/remote.rb
+index e467d0a..7dc7951 100644
+--- a/pcsd/remote.rb
++++ b/pcsd/remote.rb
+@@ -2240,7 +2240,7 @@ def set_node_utilization(params, reqest, auth_user)
+ 
+   if retval != 0
+     return [400, "Unable to set utilization '#{name}=#{value}' for node " +
+-      "'#{res_id}': #{stderr.join('')}"
++      "'#{node}': #{stderr.join('')}"
+     ]
+   end
+   return 200
+-- 
+1.8.3.1
+

@@ -1,0 +1,116 @@
+From cb2347ad79fe30076fad1579d1f5ee27a1835963 Mon Sep 17 00:00:00 2001
+From: Tomas Jelinek <tojeline@redhat.com>
+Date: Fri, 22 Jul 2016 16:29:04 +0200
+Subject: [PATCH] fix check if id exists in cib
+
+---
+ pcs/lib/cib/tools.py           | 11 ++++++++++-
+ pcs/test/test_lib_cib_tools.py | 24 ++++++++++++++++++++++++
+ pcs/utils.py                   | 30 +++++++++++++++++++++++++-----
+ 3 files changed, 59 insertions(+), 6 deletions(-)
+
+diff --git a/pcs/lib/cib/tools.py b/pcs/lib/cib/tools.py
+index b59d50d..f86b63b 100644
+--- a/pcs/lib/cib/tools.py
++++ b/pcs/lib/cib/tools.py
+@@ -21,7 +21,16 @@ def does_id_exist(tree, check_id):
+     tree cib etree node
+     check_id id to check
+     """
+-    return tree.find('.//*[@id="{0}"]'.format(check_id)) is not None
++    # ElementTree has getroot, Elemet has getroottree
++    root = tree.getroot() if hasattr(tree, "getroot") else tree.getroottree()
++    # do not search in /cib/status, it may contain references to previously
++    # existing and deleted resources and thus preventing creating them again
++    existing = root.xpath(
++        '(/cib/*[name()!="status"]|/*[name()!="cib"])//*[@id="{0}"]'.format(
++            check_id
++        )
++    )
++    return len(existing) > 0
+ 
+ def validate_id_does_not_exist(tree, id):
+     """
+diff --git a/pcs/test/test_lib_cib_tools.py b/pcs/test/test_lib_cib_tools.py
+index 1149a3f..e1f2313 100644
+--- a/pcs/test/test_lib_cib_tools.py
++++ b/pcs/test/test_lib_cib_tools.py
+@@ -48,6 +48,30 @@ class DoesIdExistTest(CibToolsTest):
+         self.assertFalse(lib.does_id_exist(self.cib.tree, "myId "))
+         self.assertFalse(lib.does_id_exist(self.cib.tree, "my Id"))
+ 
++    def test_ignore_status_section(self):
++        self.cib.append_to_first_tag_name(
++            "status",
++            """\
++<elem1 id="status-1">
++    <elem1a id="status-1a">
++        <elem1aa id="status-1aa"/>
++        <elem1ab id="status-1ab"/>
++    </elem1a>
++    <elem1b id="status-1b">
++        <elem1ba id="status-1ba"/>
++        <elem1bb id="status-1bb"/>
++    </elem1b>
++</elem1>
++"""
++        )
++        self.assertFalse(lib.does_id_exist(self.cib.tree, "status-1"))
++        self.assertFalse(lib.does_id_exist(self.cib.tree, "status-1a"))
++        self.assertFalse(lib.does_id_exist(self.cib.tree, "status-1aa"))
++        self.assertFalse(lib.does_id_exist(self.cib.tree, "status-1ab"))
++        self.assertFalse(lib.does_id_exist(self.cib.tree, "status-1b"))
++        self.assertFalse(lib.does_id_exist(self.cib.tree, "status-1ba"))
++        self.assertFalse(lib.does_id_exist(self.cib.tree, "status-1bb"))
++
+ class FindUniqueIdTest(CibToolsTest):
+     def test_already_unique(self):
+         self.fixture_add_primitive_with_id("myId")
+diff --git a/pcs/utils.py b/pcs/utils.py
+index 079d916..a7ed975 100644
+--- a/pcs/utils.py
++++ b/pcs/utils.py
+@@ -1589,15 +1589,35 @@ def is_valid_cib_scope(scope):
+ # Checks to see if id exists in the xml dom passed
+ # DEPRECATED use lxml version available in pcs.lib.cib.tools
+ def does_id_exist(dom, check_id):
++    # do not search in /cib/status, it may contain references to previously
++    # existing and deleted resources and thus preventing creating them again
+     if is_etree(dom):
+-        for elem in dom.findall(str(".//*")):
++        for elem in dom.findall(str(
++            '(/cib/*[name()!="status"]|/*[name()!="cib"])/*'
++        )):
+             if elem.get("id") == check_id:
+                 return True
+     else:
+-        all_elem = dom.getElementsByTagName("*")
+-        for elem in all_elem:
+-            if elem.getAttribute("id") == check_id:
+-                return True
++        document = (
++            dom
++            if isinstance(dom, xml.dom.minidom.Document)
++            else dom.ownerDocument
++        )
++        cib_found = False
++        for cib in dom_get_children_by_tag_name(document, "cib"):
++            cib_found = True
++            for section in cib.childNodes:
++                if section.nodeType != xml.dom.minidom.Node.ELEMENT_NODE:
++                    continue
++                if section.tagName == "status":
++                    continue
++                for elem in section.getElementsByTagName("*"):
++                    if elem.getAttribute("id") == check_id:
++                        return True
++        if not cib_found:
++            for elem in document.getElementsByTagName("*"):
++                if elem.getAttribute("id") == check_id:
++                    return True
+     return False
+ 
+ # Returns check_id if it doesn't exist in the dom, otherwise it adds an integer
+-- 
+1.8.3.1
+

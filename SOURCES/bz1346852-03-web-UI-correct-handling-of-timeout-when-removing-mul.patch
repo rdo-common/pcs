@@ -1,0 +1,34 @@
+From 900da783cefaa9f8d81ac72bf90b532638ac297b Mon Sep 17 00:00:00 2001
+From: Ondrej Mular <omular@redhat.com>
+Date: Mon, 25 Jul 2016 15:30:49 +0200
+Subject: [PATCH] web UI: correct handling of timeout when removing multiple
+ resources
+
+If there are only 2 nodes in cluster (timeout for request is 30 seconds per node)
+and removing resources takes longer then 1 minute, we have no other nodes to try
+remove resources so it will be returned to javascript as there was no response
+from cluster. Now we handle this stituation properly.
+---
+ pcsd/public/js/pcsd.js | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/pcsd/public/js/pcsd.js b/pcsd/public/js/pcsd.js
+index e763482..45da010 100644
+--- a/pcsd/public/js/pcsd.js
++++ b/pcsd/public/js/pcsd.js
+@@ -1291,7 +1291,11 @@ function remove_resource(ids, force) {
+     error: function (xhr, status, error) {
+       error = $.trim(error);
+       var message = "";
+-      if (status == "timeout" || error == "timeout") {
++      if (
++        status == "timeout" ||
++        error == "timeout" ||
++        xhr.responseText == '{"noresponse":true}'
++      ) {
+         message = "Operation takes longer to complete than expected.";
+       } else {
+         message = "Unable to remove resources (" + error + ")";
+-- 
+1.8.3.1
+

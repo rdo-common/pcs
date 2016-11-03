@@ -1,0 +1,80 @@
+From e27fb389233d1f66dcda32fa7d06192a82f5944f Mon Sep 17 00:00:00 2001
+From: Ivan Devat <idevat@redhat.com>
+Date: Tue, 24 May 2016 07:26:15 +0200
+Subject: [PATCH] adapt working with gems to rhel 7
+
+---
+ pcsd/Gemfile      | 7 +------
+ pcsd/Gemfile.lock | 3 ---
+ pcsd/Makefile     | 5 +----
+ 3 files changed, 2 insertions(+), 13 deletions(-)
+
+diff --git a/pcsd/Gemfile b/pcsd/Gemfile
+index e851eaf..6526f53 100644
+--- a/pcsd/Gemfile
++++ b/pcsd/Gemfile
+@@ -1,9 +1,5 @@
+ source 'https://rubygems.org'
+ 
+-source 'https://tojeline.fedorapeople.org/rubygems/' do
+-    gem 'rpam-ruby19-feist', :platform => :ruby_18
+-end
+-
+ gem 'sinatra'
+ gem 'sinatra-contrib'
+ gem 'rack'
+@@ -12,8 +8,7 @@ gem 'tilt'
+ gem 'eventmachine'
+ gem 'rack-test'
+ gem 'backports'
+-gem 'rpam-ruby19', :platform => [:ruby_19, :ruby_20, :ruby_21, :ruby_22]
+-gem 'json'
++gem 'rpam-ruby19'
+ gem 'multi_json'
+ gem 'open4'
+ gem 'orderedhash'
+diff --git a/pcsd/Gemfile.lock b/pcsd/Gemfile.lock
+index eff055a..15ee9b3 100644
+--- a/pcsd/Gemfile.lock
++++ b/pcsd/Gemfile.lock
+@@ -1,10 +1,8 @@
+ GEM
+   remote: https://rubygems.org/
+-  remote: https://tojeline.fedorapeople.org/rubygems/
+   specs:
+     backports (3.6.8)
+     eventmachine (1.2.0.1)
+-    json (1.8.3)
+     multi_json (1.12.0)
+     open4 (1.3.4)
+     orderedhash (0.0.6)
+@@ -33,7 +31,6 @@ PLATFORMS
+ DEPENDENCIES
+   backports
+   eventmachine
+-  json
+   multi_json
+   open4
+   orderedhash
+diff --git a/pcsd/Makefile b/pcsd/Makefile
+index 798a8bd..08d9cf1 100644
+--- a/pcsd/Makefile
++++ b/pcsd/Makefile
+@@ -1,4 +1,4 @@
+-build_gems: get_gems
++build_gems:
+ 	bundle install --local --deployment
+ 
+ # RHEL6 needs special rpam-ruby19 gem to work with 1.8.7
+@@ -21,8 +21,5 @@ build_gems_rhel6:
+ 	vendor/cache/sinatra-contrib-1.4.7.gem \
+ 	-- '--with-ldflags="-Wl,-z,now -Wl,-z,relro"'
+ 
+-get_gems:
+-	bundle package
+-
+ clean:
+ 	rm -rfv vendor/
+-- 
+1.8.3.1
+

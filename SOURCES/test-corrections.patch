@@ -1,0 +1,1312 @@
+From 60a297aa6a1e2d31619da281d843235edcaa43bb Mon Sep 17 00:00:00 2001
+From: Ivan Devat <idevat@redhat.com>
+Date: Wed, 14 Sep 2016 09:04:57 +0200
+Subject: [PATCH] squash test corrections
+
+test: import correct unittest version
+
+test: merge modules importing unittest with version care
+
+test: factor out recurring fixture in tests
+---
+ pcs/cli/booth/test/test_command.py                    |  4 ++--
+ pcs/cli/booth/test/test_env.py                        |  4 ++--
+ pcs/cli/common/test/test_completion.py                |  2 +-
+ pcs/cli/common/test/test_console_report.py            |  2 +-
+ pcs/cli/common/test/test_lib_wrapper.py               |  4 ++--
+ pcs/cli/common/test/test_middleware.py                |  2 +-
+ pcs/cli/common/test/test_parse_args.py                |  2 +-
+ pcs/cli/constraint/test/test_command.py               |  4 ++--
+ pcs/cli/constraint/test/test_console_report.py        |  2 +-
+ pcs/cli/constraint/test/test_parse_args.py            |  9 ++-------
+ pcs/cli/constraint_all/test/test_console_report.py    |  4 ++--
+ pcs/cli/constraint_ticket/test/test_command.py        |  4 ++--
+ pcs/cli/constraint_ticket/test/test_console_report.py |  2 +-
+ pcs/cli/constraint_ticket/test/test_parse_args.py     |  2 +-
+ pcs/lib/booth/test/test_config_exchange.py            |  2 +-
+ pcs/lib/booth/test/test_config_files.py               | 10 ++++------
+ pcs/lib/booth/test/test_config_structure.py           |  4 ++--
+ pcs/lib/booth/test/test_env.py                        | 11 ++++-------
+ pcs/lib/booth/test/test_resource.py                   |  4 ++--
+ pcs/lib/booth/test/test_status.py                     |  4 ++--
+ pcs/lib/booth/test/test_sync.py                       |  4 ++--
+ pcs/lib/cib/test/test_alert.py                        |  4 ++--
+ pcs/lib/cib/test/test_constraint.py                   |  4 ++--
+ pcs/lib/cib/test/test_constraint_colocation.py        |  4 ++--
+ pcs/lib/cib/test/test_constraint_order.py             |  4 ++--
+ pcs/lib/cib/test/test_constraint_ticket.py            |  4 ++--
+ pcs/lib/cib/test/test_nvpair.py                       |  2 +-
+ pcs/lib/cib/test/test_resource.py                     |  2 +-
+ pcs/lib/cib/test/test_resource_set.py                 |  4 ++--
+ pcs/lib/commands/test/test_alert.py                   |  4 ++--
+ pcs/lib/commands/test/test_booth.py                   | 10 ++++------
+ pcs/lib/commands/test/test_constraint_common.py       |  4 ++--
+ pcs/lib/commands/test/test_ticket.py                  |  2 +-
+ pcs/lib/test/misc.py                                  |  2 +-
+ pcs/lib/test/test_env_file.py                         |  4 ++--
+ pcs/lib/test/test_errors.py                           |  2 +-
+ pcs/lib/test/test_pacemaker_values.py                 |  2 +-
+ pcs/test/test_acl.py                                  |  2 +-
+ pcs/test/test_cluster.py                              |  2 +-
+ pcs/test/test_common_tools.py                         |  2 +-
+ pcs/test/test_constraints.py                          |  2 +-
+ pcs/test/test_lib_cib_acl.py                          |  2 +-
+ pcs/test/test_lib_cib_tools.py                        |  4 ++--
+ pcs/test/test_lib_commands_qdevice.py                 |  4 ++--
+ pcs/test/test_lib_commands_quorum.py                  |  4 ++--
+ pcs/test/test_lib_commands_sbd.py                     |  4 ++--
+ pcs/test/test_lib_corosync_config_facade.py           |  2 +-
+ pcs/test/test_lib_corosync_config_parser.py           |  2 +-
+ pcs/test/test_lib_corosync_live.py                    |  4 ++--
+ pcs/test/test_lib_corosync_qdevice_client.py          |  4 ++--
+ pcs/test/test_lib_corosync_qdevice_net.py             |  4 ++--
+ pcs/test/test_lib_env.py                              |  4 ++--
+ pcs/test/test_lib_external.py                         |  4 ++--
+ pcs/test/test_lib_node.py                             |  2 +-
+ pcs/test/test_lib_nodes_task.py                       |  4 ++--
+ pcs/test/test_lib_pacemaker.py                        |  4 ++--
+ pcs/test/test_lib_pacemaker_state.py                  |  2 +-
+ pcs/test/test_lib_resource_agent.py                   |  4 ++--
+ pcs/test/test_lib_sbd.py                              |  4 ++--
+ pcs/test/test_lib_tools.py                            |  2 +-
+ pcs/test/test_node.py                                 |  2 +-
+ pcs/test/test_properties.py                           |  2 +-
+ pcs/test/test_quorum.py                               |  2 +-
+ pcs/test/test_resource.py                             |  2 +-
+ pcs/test/test_rule.py                                 |  2 +-
+ pcs/test/test_stonith.py                              |  2 +-
+ pcs/test/test_utils.py                                |  2 +-
+ pcs/test/tools/misc.py                                | 14 ++++++++++++++
+ pcs/test/tools/pcs_mock.py                            | 13 -------------
+ pcs/test/tools/pcs_unittest.py                        | 19 +++++++++++++++++++
+ 70 files changed, 142 insertions(+), 134 deletions(-)
+ delete mode 100644 pcs/test/tools/pcs_mock.py
+
+diff --git a/pcs/cli/booth/test/test_command.py b/pcs/cli/booth/test/test_command.py
+index 019a74f..44d7a12 100644
+--- a/pcs/cli/booth/test/test_command.py
++++ b/pcs/cli/booth/test/test_command.py
+@@ -5,10 +5,10 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ from pcs.cli.booth import command
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ 
+ 
+ class ConfigSetupTest(TestCase):
+diff --git a/pcs/cli/booth/test/test_env.py b/pcs/cli/booth/test/test_env.py
+index 1ead6f2..b1d80aa 100644
+--- a/pcs/cli/booth/test/test_env.py
++++ b/pcs/cli/booth/test/test_env.py
+@@ -5,12 +5,12 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ from pcs.cli.booth.env import middleware_config
+ from pcs.common import report_codes, env_file_role_codes
+ from pcs.lib.errors import LibraryEnvError, ReportItem
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ 
+ 
+ class BoothConfTest(TestCase):
+diff --git a/pcs/cli/common/test/test_completion.py b/pcs/cli/common/test/test_completion.py
+index 865da2c..daec1bc 100644
+--- a/pcs/cli/common/test/test_completion.py
++++ b/pcs/cli/common/test/test_completion.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ from pcs.cli.common.completion import (
+     _find_suggestions,
+diff --git a/pcs/cli/common/test/test_console_report.py b/pcs/cli/common/test/test_console_report.py
+index 23cf8e9..63fe55c 100644
+--- a/pcs/cli/common/test/test_console_report.py
++++ b/pcs/cli/common/test/test_console_report.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ from pcs.cli.common.console_report import indent
+ 
+ class IndentTest(TestCase):
+diff --git a/pcs/cli/common/test/test_lib_wrapper.py b/pcs/cli/common/test/test_lib_wrapper.py
+index c10bb62..149e612 100644
+--- a/pcs/cli/common/test/test_lib_wrapper.py
++++ b/pcs/cli/common/test/test_lib_wrapper.py
+@@ -4,10 +4,10 @@ from __future__ import (
+     print_function,
+     unicode_literals,
+ )
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ from pcs.cli.common.lib_wrapper import Library, bind
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ from pcs.lib.errors import ReportItem
+ from pcs.lib.errors import LibraryEnvError
+ 
+diff --git a/pcs/cli/common/test/test_middleware.py b/pcs/cli/common/test/test_middleware.py
+index c030cd9..7eefbca 100644
+--- a/pcs/cli/common/test/test_middleware.py
++++ b/pcs/cli/common/test/test_middleware.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ from pcs.cli.common import middleware
+ 
+diff --git a/pcs/cli/common/test/test_parse_args.py b/pcs/cli/common/test/test_parse_args.py
+index eb358a5..23704b9 100644
+--- a/pcs/cli/common/test/test_parse_args.py
++++ b/pcs/cli/common/test/test_parse_args.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ from pcs.cli.common.parse_args import(
+     split_list,
+     prepare_options,
+diff --git a/pcs/cli/constraint/test/test_command.py b/pcs/cli/constraint/test/test_command.py
+index 5b493cd..6a79e00 100644
+--- a/pcs/cli/constraint/test/test_command.py
++++ b/pcs/cli/constraint/test/test_command.py
+@@ -5,10 +5,10 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ from pcs.cli.constraint import command
+ 
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ 
+ def fixture_constraint():
+     return {
+diff --git a/pcs/cli/constraint/test/test_console_report.py b/pcs/cli/constraint/test/test_console_report.py
+index b20bc80..084124c 100644
+--- a/pcs/cli/constraint/test/test_console_report.py
++++ b/pcs/cli/constraint/test/test_console_report.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ from pcs.cli.constraint import console_report
+ 
+ class OptionsTest(TestCase):
+diff --git a/pcs/cli/constraint/test/test_parse_args.py b/pcs/cli/constraint/test/test_parse_args.py
+index 7673023..484cb8d 100644
+--- a/pcs/cli/constraint/test/test_parse_args.py
++++ b/pcs/cli/constraint/test/test_parse_args.py
+@@ -5,16 +5,11 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ from pcs.cli.common.errors import CmdLineInputError
+ from pcs.cli.constraint.parse_args import prepare_set_args, prepare_resource_sets
+-
+-
+-try:
+-    import unittest.mock as mock
+-except ImportError:
+-    import mock
++from pcs.test.tools.pcs_unittest import mock
+ 
+ 
+ @mock.patch("pcs.cli.common.parse_args.prepare_options")
+diff --git a/pcs/cli/constraint_all/test/test_console_report.py b/pcs/cli/constraint_all/test/test_console_report.py
+index 1cf5721..61be2cc 100644
+--- a/pcs/cli/constraint_all/test/test_console_report.py
++++ b/pcs/cli/constraint_all/test/test_console_report.py
+@@ -5,8 +5,8 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import TestCase
++from pcs.test.tools.pcs_unittest import mock
+ from pcs.cli.constraint_all import console_report
+ 
+ class ConstraintTest(TestCase):
+diff --git a/pcs/cli/constraint_ticket/test/test_command.py b/pcs/cli/constraint_ticket/test/test_command.py
+index 045d336..d40d421 100644
+--- a/pcs/cli/constraint_ticket/test/test_command.py
++++ b/pcs/cli/constraint_ticket/test/test_command.py
+@@ -5,9 +5,9 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ from pcs.cli.common.errors import CmdLineInputError
+ from pcs.cli.constraint_ticket import command
+ 
+diff --git a/pcs/cli/constraint_ticket/test/test_console_report.py b/pcs/cli/constraint_ticket/test/test_console_report.py
+index b352287..11af2e2 100644
+--- a/pcs/cli/constraint_ticket/test/test_console_report.py
++++ b/pcs/cli/constraint_ticket/test/test_console_report.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ from pcs.cli.constraint_ticket import console_report
+ 
+ class ConstraintPlainTest(TestCase):
+diff --git a/pcs/cli/constraint_ticket/test/test_parse_args.py b/pcs/cli/constraint_ticket/test/test_parse_args.py
+index 9d23167..4a592c2 100644
+--- a/pcs/cli/constraint_ticket/test/test_parse_args.py
++++ b/pcs/cli/constraint_ticket/test/test_parse_args.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ from pcs.cli.constraint_ticket import parse_args
+ from pcs.cli.common.errors import CmdLineInputError
+ 
+diff --git a/pcs/lib/booth/test/test_config_exchange.py b/pcs/lib/booth/test/test_config_exchange.py
+index eb1885c..9717a96 100644
+--- a/pcs/lib/booth/test/test_config_exchange.py
++++ b/pcs/lib/booth/test/test_config_exchange.py
+@@ -4,7 +4,7 @@ from __future__ import (
+     print_function,
+     unicode_literals,
+ )
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ from pcs.lib.booth import config_structure, config_exchange
+ 
+ 
+diff --git a/pcs/lib/booth/test/test_config_files.py b/pcs/lib/booth/test/test_config_files.py
+index 8266cac..d0df256 100644
+--- a/pcs/lib/booth/test/test_config_files.py
++++ b/pcs/lib/booth/test/test_config_files.py
+@@ -6,7 +6,7 @@ from __future__ import (
+ )
+ 
+ import os.path
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ from pcs.common import report_codes, env_file_role_codes as file_roles
+ from pcs.lib.booth import config_files
+@@ -14,12 +14,10 @@ from pcs.lib.errors import ReportItemSeverity as severities
+ from pcs.settings import booth_config_dir as BOOTH_CONFIG_DIR
+ from pcs.test.tools.assertions import assert_raise_library_error, assert_report_item_list_equal
+ from pcs.test.tools.custom_mock import MockLibraryReportProcessor
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.misc import create_patcher
++from pcs.test.tools.pcs_unittest import mock
+ 
+-def patch_config_files(target, *args, **kwargs):
+-    return mock.patch(
+-        "pcs.lib.booth.config_files.{0}".format(target), *args, **kwargs
+-    )
++patch_config_files = create_patcher("pcs.lib.booth.config_files")
+ 
+ @mock.patch("os.path.isdir")
+ @mock.patch("os.listdir")
+diff --git a/pcs/lib/booth/test/test_config_structure.py b/pcs/lib/booth/test/test_config_structure.py
+index 1dd07cb..5e7ac68 100644
+--- a/pcs/lib/booth/test/test_config_structure.py
++++ b/pcs/lib/booth/test/test_config_structure.py
+@@ -5,13 +5,13 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ from pcs.common import report_codes
+ from pcs.lib.booth import config_structure
+ from pcs.lib.errors import ReportItemSeverity as severities
+ from pcs.test.tools.assertions import assert_raise_library_error
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ 
+ 
+ class ValidateTicketExistsTest(TestCase):
+diff --git a/pcs/lib/booth/test/test_env.py b/pcs/lib/booth/test/test_env.py
+index 77e0944..993d709 100644
+--- a/pcs/lib/booth/test/test_env.py
++++ b/pcs/lib/booth/test/test_env.py
+@@ -8,20 +8,17 @@ from __future__ import (
+ import grp
+ import os
+ import pwd
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ from pcs import settings
+ from pcs.common import report_codes
+ from pcs.lib.booth import env
+ from pcs.lib.errors import ReportItemSeverity as severities
+ from pcs.test.tools.assertions import assert_raise_library_error
+-from pcs.test.tools.misc import get_test_resource as rc
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.misc import get_test_resource as rc, create_patcher
++from pcs.test.tools.pcs_unittest import mock
+ 
+-def patch_env(target, *args, **kwargs):
+-    return mock.patch(
+-        "pcs.lib.booth.env.{0}".format(target), *args, **kwargs
+-    )
++patch_env = create_patcher("pcs.lib.booth.env")
+ 
+ class GetConfigFileNameTest(TestCase):
+     @patch_env("os.path.exists")
+diff --git a/pcs/lib/booth/test/test_resource.py b/pcs/lib/booth/test/test_resource.py
+index dd72c1e..8971438 100644
+--- a/pcs/lib/booth/test/test_resource.py
++++ b/pcs/lib/booth/test/test_resource.py
+@@ -5,12 +5,12 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ from lxml import etree
+ 
+ import pcs.lib.booth.resource as booth_resource
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ from pcs.test.tools.misc import get_test_resource as rc
+ 
+ 
+diff --git a/pcs/lib/booth/test/test_status.py b/pcs/lib/booth/test/test_status.py
+index 0ea837a..d47ffca 100644
+--- a/pcs/lib/booth/test/test_status.py
++++ b/pcs/lib/booth/test/test_status.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ try:
+     # python 2
+@@ -15,7 +15,7 @@ except ImportError:
+     # python 3
+     from urllib.parse import parse_qs as url_decode
+ 
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ from pcs.test.tools.assertions import assert_raise_library_error
+ 
+ from pcs import settings
+diff --git a/pcs/lib/booth/test/test_sync.py b/pcs/lib/booth/test/test_sync.py
+index 9ba6e80..701b086 100644
+--- a/pcs/lib/booth/test/test_sync.py
++++ b/pcs/lib/booth/test/test_sync.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ import json
+ import base64
+@@ -16,7 +16,7 @@ except ImportError:
+     # python 3
+     from urllib.parse import parse_qs as url_decode
+ 
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ from pcs.test.tools.assertions import (
+     assert_report_item_list_equal,
+     assert_raise_library_error,
+diff --git a/pcs/lib/cib/test/test_alert.py b/pcs/lib/cib/test/test_alert.py
+index 50eaef6..c47dd1e 100644
+--- a/pcs/lib/cib/test/test_alert.py
++++ b/pcs/lib/cib/test/test_alert.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ from lxml import etree
+ 
+@@ -17,7 +17,7 @@ from pcs.test.tools.assertions import(
+     assert_xml_equal,
+     assert_report_item_list_equal,
+ )
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ from pcs.test.tools.custom_mock import MockLibraryReportProcessor
+ 
+ 
+diff --git a/pcs/lib/cib/test/test_constraint.py b/pcs/lib/cib/test/test_constraint.py
+index 961f8b0..a4ee636 100644
+--- a/pcs/lib/cib/test/test_constraint.py
++++ b/pcs/lib/cib/test/test_constraint.py
+@@ -6,7 +6,7 @@ from __future__ import (
+ )
+ 
+ from functools import partial
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ from lxml import etree
+ 
+@@ -18,7 +18,7 @@ from pcs.test.tools.assertions import(
+     assert_xml_equal,
+ )
+ from pcs.test.tools.custom_mock import MockLibraryReportProcessor
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ from pcs.test.tools.assertions import (
+     assert_report_item_list_equal,
+ )
+diff --git a/pcs/lib/cib/test/test_constraint_colocation.py b/pcs/lib/cib/test/test_constraint_colocation.py
+index 377b981..6a85d8a 100644
+--- a/pcs/lib/cib/test/test_constraint_colocation.py
++++ b/pcs/lib/cib/test/test_constraint_colocation.py
+@@ -5,13 +5,13 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ from pcs.common import report_codes
+ from pcs.lib.cib.constraint import colocation
+ from pcs.lib.errors import ReportItemSeverity as severities
+ from pcs.test.tools.assertions import assert_raise_library_error
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ 
+ 
+ #Patch check_new_id_applicable is always desired when working with
+diff --git a/pcs/lib/cib/test/test_constraint_order.py b/pcs/lib/cib/test/test_constraint_order.py
+index 02d1c5f..3cb33d1 100644
+--- a/pcs/lib/cib/test/test_constraint_order.py
++++ b/pcs/lib/cib/test/test_constraint_order.py
+@@ -5,13 +5,13 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ from pcs.common import report_codes
+ from pcs.lib.cib.constraint import order
+ from pcs.lib.errors import ReportItemSeverity as severities
+ from pcs.test.tools.assertions import assert_raise_library_error
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ 
+ 
+ #Patch check_new_id_applicable is always desired when working with
+diff --git a/pcs/lib/cib/test/test_constraint_ticket.py b/pcs/lib/cib/test/test_constraint_ticket.py
+index 87fd1e5..ede748e 100644
+--- a/pcs/lib/cib/test/test_constraint_ticket.py
++++ b/pcs/lib/cib/test/test_constraint_ticket.py
+@@ -6,13 +6,13 @@ from __future__ import (
+ )
+ 
+ from functools import partial
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ from pcs.common import report_codes
+ from pcs.lib.cib.constraint import ticket
+ from pcs.lib.errors import ReportItemSeverity as severities
+ from pcs.test.tools.assertions import assert_raise_library_error
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ 
+ 
+ @mock.patch("pcs.lib.cib.constraint.ticket.tools.check_new_id_applicable")
+diff --git a/pcs/lib/cib/test/test_nvpair.py b/pcs/lib/cib/test/test_nvpair.py
+index 6907f25..56ba4d1 100644
+--- a/pcs/lib/cib/test/test_nvpair.py
++++ b/pcs/lib/cib/test/test_nvpair.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ from lxml import etree
+ 
+diff --git a/pcs/lib/cib/test/test_resource.py b/pcs/lib/cib/test/test_resource.py
+index ef33ef6..c1e21a0 100644
+--- a/pcs/lib/cib/test/test_resource.py
++++ b/pcs/lib/cib/test/test_resource.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ from lxml import etree
+ from pcs.lib.cib.resource import find_by_id
+ 
+diff --git a/pcs/lib/cib/test/test_resource_set.py b/pcs/lib/cib/test/test_resource_set.py
+index 7b77ac4..e4fd8e4 100644
+--- a/pcs/lib/cib/test/test_resource_set.py
++++ b/pcs/lib/cib/test/test_resource_set.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ from lxml import etree
+ 
+@@ -16,7 +16,7 @@ from pcs.test.tools.assertions import(
+     assert_raise_library_error,
+     assert_xml_equal
+ )
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ 
+ 
+ class PrepareSetTest(TestCase):
+diff --git a/pcs/lib/commands/test/test_alert.py b/pcs/lib/commands/test/test_alert.py
+index bced45e..bc68baf 100644
+--- a/pcs/lib/commands/test/test_alert.py
++++ b/pcs/lib/commands/test/test_alert.py
+@@ -8,9 +8,9 @@ from __future__ import (
+ import logging
+ from lxml import etree
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ from pcs.test.tools.assertions import (
+     assert_raise_library_error,
+     assert_xml_equal,
+diff --git a/pcs/lib/commands/test/test_booth.py b/pcs/lib/commands/test/test_booth.py
+index d2429b6..08d2c79 100644
+--- a/pcs/lib/commands/test/test_booth.py
++++ b/pcs/lib/commands/test/test_booth.py
+@@ -8,14 +8,15 @@ from __future__ import (
+ import os
+ import base64
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ from pcs.test.tools.custom_mock import MockLibraryReportProcessor
+ from pcs.test.tools.assertions import (
+     assert_raise_library_error,
+     assert_report_item_list_equal,
+ )
++from pcs.test.tools.misc import create_patcher
+ 
+ from pcs import settings
+ from pcs.common import report_codes
+@@ -32,10 +33,7 @@ from pcs.lib.external import (
+     StopServiceError
+ )
+ 
+-def patch_commands(target, *args, **kwargs):
+-    return mock.patch(
+-        "pcs.lib.commands.booth.{0}".format(target), *args, **kwargs
+-    )
++patch_commands = create_patcher("pcs.lib.commands.booth")
+ 
+ @mock.patch("pcs.lib.booth.config_files.generate_key", return_value="key value")
+ @mock.patch("pcs.lib.commands.booth.build", return_value="config content")
+diff --git a/pcs/lib/commands/test/test_constraint_common.py b/pcs/lib/commands/test/test_constraint_common.py
+index e0872ff..cb5e177 100644
+--- a/pcs/lib/commands/test/test_constraint_common.py
++++ b/pcs/lib/commands/test/test_constraint_common.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ from lxml import etree
+ 
+@@ -17,7 +17,7 @@ from pcs.test.tools.assertions import(
+     assert_xml_equal,
+ )
+ from pcs.test.tools.custom_mock import MockLibraryReportProcessor
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ 
+ 
+ def fixture_cib_and_constraints():
+diff --git a/pcs/lib/commands/test/test_ticket.py b/pcs/lib/commands/test/test_ticket.py
+index d8b8a5f..586ca4b 100644
+--- a/pcs/lib/commands/test/test_ticket.py
++++ b/pcs/lib/commands/test/test_ticket.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ from pcs.common import report_codes
+ from pcs.lib.commands.constraint import ticket as ticket_command
+diff --git a/pcs/lib/test/misc.py b/pcs/lib/test/misc.py
+index 1b1670a..be99bb2 100644
+--- a/pcs/lib/test/misc.py
++++ b/pcs/lib/test/misc.py
+@@ -9,7 +9,7 @@ import logging
+ 
+ from pcs.lib.env import LibraryEnvironment as Env
+ from pcs.test.tools.custom_mock import MockLibraryReportProcessor
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ 
+ 
+ def get_mocked_env(**kwargs):
+diff --git a/pcs/lib/test/test_env_file.py b/pcs/lib/test/test_env_file.py
+index 3e27af1..754b40e 100644
+--- a/pcs/lib/test/test_env_file.py
++++ b/pcs/lib/test/test_env_file.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ from pcs.common import report_codes
+ from pcs.lib.env_file import RealFile, GhostFile
+@@ -15,7 +15,7 @@ from pcs.test.tools.assertions import(
+     assert_report_item_list_equal
+ )
+ from pcs.test.tools.custom_mock import MockLibraryReportProcessor
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ 
+ 
+ class GhostFileReadTest(TestCase):
+diff --git a/pcs/lib/test/test_errors.py b/pcs/lib/test/test_errors.py
+index 2e99e19..871aa76 100644
+--- a/pcs/lib/test/test_errors.py
++++ b/pcs/lib/test/test_errors.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ from pcs.lib.errors import LibraryEnvError
+ 
+diff --git a/pcs/lib/test/test_pacemaker_values.py b/pcs/lib/test/test_pacemaker_values.py
+index 7979990..62b8e91 100644
+--- a/pcs/lib/test/test_pacemaker_values.py
++++ b/pcs/lib/test/test_pacemaker_values.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ from pcs.test.tools.assertions import assert_raise_library_error
+ 
+diff --git a/pcs/test/test_acl.py b/pcs/test/test_acl.py
+index b053614..186c035 100644
+--- a/pcs/test/test_acl.py
++++ b/pcs/test/test_acl.py
+@@ -6,7 +6,7 @@ from __future__ import (
+ )
+ 
+ import shutil
+-import unittest
++from pcs.test.tools import pcs_unittest as unittest
+ 
+ from pcs.test.tools.assertions import AssertPcsMixin
+ from pcs.test.tools.misc import (
+diff --git a/pcs/test/test_cluster.py b/pcs/test/test_cluster.py
+index 8a245a2..36f3687 100644
+--- a/pcs/test/test_cluster.py
++++ b/pcs/test/test_cluster.py
+@@ -7,7 +7,7 @@ from __future__ import (
+ 
+ import os
+ import shutil
+-import unittest
++from pcs.test.tools import pcs_unittest as unittest
+ 
+ from pcs.test.tools.assertions import AssertPcsMixin
+ from pcs.test.tools.misc import (
+diff --git a/pcs/test/test_common_tools.py b/pcs/test/test_common_tools.py
+index 5c8482e..5290e6d 100644
+--- a/pcs/test/test_common_tools.py
++++ b/pcs/test/test_common_tools.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ import time
+ 
+ from pcs.common import tools
+diff --git a/pcs/test/test_constraints.py b/pcs/test/test_constraints.py
+index 364b40d..7c76e09 100644
+--- a/pcs/test/test_constraints.py
++++ b/pcs/test/test_constraints.py
+@@ -7,7 +7,7 @@ from __future__ import (
+ 
+ import os
+ import shutil
+-import unittest
++from pcs.test.tools import pcs_unittest as unittest
+ 
+ from pcs.test.tools.assertions import AssertPcsMixin, console_report
+ from pcs.test.tools.misc import (
+diff --git a/pcs/test/test_lib_cib_acl.py b/pcs/test/test_lib_cib_acl.py
+index 7e1750e..efaad7e 100644
+--- a/pcs/test/test_lib_cib_acl.py
++++ b/pcs/test/test_lib_cib_acl.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ from pcs.test.tools.assertions import (
+     assert_raise_library_error,
+diff --git a/pcs/test/test_lib_cib_tools.py b/pcs/test/test_lib_cib_tools.py
+index 0fd4d22..ffc2642 100644
+--- a/pcs/test/test_lib_cib_tools.py
++++ b/pcs/test/test_lib_cib_tools.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ from os.path import join
+ from lxml import etree
+@@ -15,7 +15,7 @@ from pcs.test.tools.assertions import (
+     assert_xml_equal,
+ )
+ from pcs.test.tools.misc import get_test_resource as rc
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ from pcs.test.tools.xml import get_xml_manipulation_creator_from_file
+ 
+ from pcs import settings
+diff --git a/pcs/test/test_lib_commands_qdevice.py b/pcs/test/test_lib_commands_qdevice.py
+index ff588d5..10841e9 100644
+--- a/pcs/test/test_lib_commands_qdevice.py
++++ b/pcs/test/test_lib_commands_qdevice.py
+@@ -5,11 +5,11 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ import base64
+ import logging
+ 
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ from pcs.test.tools.assertions import (
+     assert_raise_library_error,
+     assert_report_item_list_equal,
+diff --git a/pcs/test/test_lib_commands_quorum.py b/pcs/test/test_lib_commands_quorum.py
+index d286a8f..d7701af 100644
+--- a/pcs/test/test_lib_commands_quorum.py
++++ b/pcs/test/test_lib_commands_quorum.py
+@@ -6,7 +6,7 @@ from __future__ import (
+ )
+ 
+ import logging
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ from pcs.test.tools.assertions import (
+     assert_raise_library_error,
+@@ -17,7 +17,7 @@ from pcs.test.tools.misc import (
+     ac,
+     get_test_resource as rc,
+ )
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ 
+ from pcs.common import report_codes
+ from pcs.lib.env import LibraryEnvironment
+diff --git a/pcs/test/test_lib_commands_sbd.py b/pcs/test/test_lib_commands_sbd.py
+index 0663082..f8146ce 100644
+--- a/pcs/test/test_lib_commands_sbd.py
++++ b/pcs/test/test_lib_commands_sbd.py
+@@ -7,9 +7,9 @@ from __future__ import (
+ 
+ import logging
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ from pcs.test.tools.assertions import (
+     assert_raise_library_error,
+     assert_report_item_list_equal,
+diff --git a/pcs/test/test_lib_corosync_config_facade.py b/pcs/test/test_lib_corosync_config_facade.py
+index 91f7b40..4373d65 100644
+--- a/pcs/test/test_lib_corosync_config_facade.py
++++ b/pcs/test/test_lib_corosync_config_facade.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ import re
+ 
+ from pcs.test.tools.assertions import (
+diff --git a/pcs/test/test_lib_corosync_config_parser.py b/pcs/test/test_lib_corosync_config_parser.py
+index da20889..a68710b 100644
+--- a/pcs/test/test_lib_corosync_config_parser.py
++++ b/pcs/test/test_lib_corosync_config_parser.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-import unittest
++from pcs.test.tools import pcs_unittest as unittest
+ 
+ from pcs.test.tools.misc import ac
+ 
+diff --git a/pcs/test/test_lib_corosync_live.py b/pcs/test/test_lib_corosync_live.py
+index 0fc5eb2..3173195 100644
+--- a/pcs/test/test_lib_corosync_live.py
++++ b/pcs/test/test_lib_corosync_live.py
+@@ -5,13 +5,13 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ import os.path
+ 
+ from pcs.test.tools.assertions import assert_raise_library_error
+ from pcs.test.tools.misc import get_test_resource as rc
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ 
+ from pcs import settings
+ from pcs.common import report_codes
+diff --git a/pcs/test/test_lib_corosync_qdevice_client.py b/pcs/test/test_lib_corosync_qdevice_client.py
+index e0332f1..0b5bd67 100644
+--- a/pcs/test/test_lib_corosync_qdevice_client.py
++++ b/pcs/test/test_lib_corosync_qdevice_client.py
+@@ -5,9 +5,9 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ from pcs.test.tools.assertions import assert_raise_library_error
+ 
+ from pcs.common import report_codes
+diff --git a/pcs/test/test_lib_corosync_qdevice_net.py b/pcs/test/test_lib_corosync_qdevice_net.py
+index 3d473f7..340a8dc 100644
+--- a/pcs/test/test_lib_corosync_qdevice_net.py
++++ b/pcs/test/test_lib_corosync_qdevice_net.py
+@@ -5,12 +5,12 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ import base64
+ import os.path
+ 
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ from pcs.test.tools.assertions import assert_raise_library_error
+ from pcs.test.tools.misc import get_test_resource
+ 
+diff --git a/pcs/test/test_lib_env.py b/pcs/test/test_lib_env.py
+index c6322b7..205fd60 100644
+--- a/pcs/test/test_lib_env.py
++++ b/pcs/test/test_lib_env.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ import logging
+ from lxml import etree
+ 
+@@ -16,7 +16,7 @@ from pcs.test.tools.assertions import (
+ )
+ from pcs.test.tools.custom_mock import MockLibraryReportProcessor
+ from pcs.test.tools.misc import get_test_resource as rc
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ 
+ from pcs.lib.env import LibraryEnvironment
+ from pcs.common import report_codes
+diff --git a/pcs/test/test_lib_external.py b/pcs/test/test_lib_external.py
+index b0ffdbb..aafbe85 100644
+--- a/pcs/test/test_lib_external.py
++++ b/pcs/test/test_lib_external.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ import os.path
+ import logging
+ try:
+@@ -27,7 +27,7 @@ from pcs.test.tools.assertions import (
+     assert_report_item_list_equal,
+ )
+ from pcs.test.tools.custom_mock import MockLibraryReportProcessor
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ 
+ from pcs import settings
+ from pcs.common import report_codes
+diff --git a/pcs/test/test_lib_node.py b/pcs/test/test_lib_node.py
+index 6c841d3..caf128f 100644
+--- a/pcs/test/test_lib_node.py
++++ b/pcs/test/test_lib_node.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ import pcs.lib.node as lib
+ 
+diff --git a/pcs/test/test_lib_nodes_task.py b/pcs/test/test_lib_nodes_task.py
+index cff88eb..6f05b15 100644
+--- a/pcs/test/test_lib_nodes_task.py
++++ b/pcs/test/test_lib_nodes_task.py
+@@ -5,14 +5,14 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ from pcs.test.tools.assertions import (
+     assert_raise_library_error,
+     assert_report_item_list_equal,
+ )
+ from pcs.test.tools.custom_mock import MockLibraryReportProcessor
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ 
+ from pcs.common import report_codes
+ from pcs.lib.external import NodeCommunicator, NodeAuthenticationException
+diff --git a/pcs/test/test_lib_pacemaker.py b/pcs/test/test_lib_pacemaker.py
+index 0edee5c..c475db6 100644
+--- a/pcs/test/test_lib_pacemaker.py
++++ b/pcs/test/test_lib_pacemaker.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ import os.path
+ 
+ from pcs.test.tools.assertions import (
+@@ -13,7 +13,7 @@ from pcs.test.tools.assertions import (
+     assert_xml_equal,
+ )
+ from pcs.test.tools.misc import get_test_resource as rc
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ from pcs.test.tools.xml import XmlManipulation
+ 
+ from pcs import settings
+diff --git a/pcs/test/test_lib_pacemaker_state.py b/pcs/test/test_lib_pacemaker_state.py
+index 54f536d..13f6eb0 100644
+--- a/pcs/test/test_lib_pacemaker_state.py
++++ b/pcs/test/test_lib_pacemaker_state.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ from lxml import etree
+ 
+ from pcs.test.tools.assertions import assert_raise_library_error
+diff --git a/pcs/test/test_lib_resource_agent.py b/pcs/test/test_lib_resource_agent.py
+index 5704184..08f9061 100644
+--- a/pcs/test/test_lib_resource_agent.py
++++ b/pcs/test/test_lib_resource_agent.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ import os.path
+ 
+ from lxml import etree
+@@ -14,7 +14,7 @@ from pcs.test.tools.assertions import (
+     ExtendedAssertionsMixin,
+     assert_xml_equal,
+ )
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ from pcs.test.tools.xml import XmlManipulation as XmlMan
+ 
+ 
+diff --git a/pcs/test/test_lib_sbd.py b/pcs/test/test_lib_sbd.py
+index 516e0bd..720d8b1 100644
+--- a/pcs/test/test_lib_sbd.py
++++ b/pcs/test/test_lib_sbd.py
+@@ -6,9 +6,9 @@ from __future__ import (
+ )
+ 
+ import json
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+-from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.pcs_unittest import mock
+ from pcs.test.tools.assertions import (
+     assert_raise_library_error,
+     assert_report_item_list_equal,
+diff --git a/pcs/test/test_lib_tools.py b/pcs/test/test_lib_tools.py
+index 5141ca9..606cb05 100644
+--- a/pcs/test/test_lib_tools.py
++++ b/pcs/test/test_lib_tools.py
+@@ -5,7 +5,7 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ from pcs.lib import tools
+ 
+diff --git a/pcs/test/test_node.py b/pcs/test/test_node.py
+index 785c711..9b45e07 100644
+--- a/pcs/test/test_node.py
++++ b/pcs/test/test_node.py
+@@ -6,7 +6,7 @@ from __future__ import (
+ )
+ 
+ import shutil
+-import unittest
++from pcs.test.tools import pcs_unittest as unittest
+ 
+ from pcs.test.tools.assertions import AssertPcsMixin
+ from pcs.test.tools.misc import (
+diff --git a/pcs/test/test_properties.py b/pcs/test/test_properties.py
+index fbaf880..9634cca 100644
+--- a/pcs/test/test_properties.py
++++ b/pcs/test/test_properties.py
+@@ -6,7 +6,7 @@ from __future__ import (
+ )
+ 
+ import shutil
+-import unittest
++from pcs.test.tools import pcs_unittest as unittest
+ 
+ from pcs.test.tools.assertions import AssertPcsMixin
+ from pcs.test.tools.misc import (
+diff --git a/pcs/test/test_quorum.py b/pcs/test/test_quorum.py
+index 86de4c6..4f15d7f 100644
+--- a/pcs/test/test_quorum.py
++++ b/pcs/test/test_quorum.py
+@@ -6,7 +6,7 @@ from __future__ import (
+ )
+ 
+ import shutil
+-from unittest import TestCase
++from pcs.test.tools.pcs_unittest import TestCase
+ 
+ from pcs.test.tools.assertions import AssertPcsMixin
+ from pcs.test.tools.misc import (
+diff --git a/pcs/test/test_resource.py b/pcs/test/test_resource.py
+index 614b895..87a7fa8 100644
+--- a/pcs/test/test_resource.py
++++ b/pcs/test/test_resource.py
+@@ -8,7 +8,7 @@ from __future__ import (
+ import os
+ import shutil
+ import re
+-import unittest
++from pcs.test.tools import pcs_unittest as unittest
+ 
+ from pcs.test.tools.assertions import AssertPcsMixin
+ from pcs.test.tools.misc import (
+diff --git a/pcs/test/test_rule.py b/pcs/test/test_rule.py
+index 8cf717a..ad3448d 100644
+--- a/pcs/test/test_rule.py
++++ b/pcs/test/test_rule.py
+@@ -6,7 +6,7 @@ from __future__ import (
+ )
+ 
+ import shutil
+-import unittest
++from pcs.test.tools import pcs_unittest as unittest
+ import xml.dom.minidom
+ 
+ from pcs import rule
+diff --git a/pcs/test/test_stonith.py b/pcs/test/test_stonith.py
+index a6ee2f5..82b2c84 100644
+--- a/pcs/test/test_stonith.py
++++ b/pcs/test/test_stonith.py
+@@ -6,7 +6,7 @@ from __future__ import (
+ )
+ 
+ import shutil
+-import unittest
++from pcs.test.tools import pcs_unittest as unittest
+ 
+ from pcs.test.tools.misc import (
+     ac,
+diff --git a/pcs/test/test_utils.py b/pcs/test/test_utils.py
+index 43145fd..252de30 100644
+--- a/pcs/test/test_utils.py
++++ b/pcs/test/test_utils.py
+@@ -6,7 +6,7 @@ from __future__ import (
+ )
+ 
+ import sys
+-import unittest
++from pcs.test.tools import pcs_unittest as unittest
+ import xml.dom.minidom
+ import xml.etree.cElementTree as ET
+ from time import sleep
+diff --git a/pcs/test/tools/misc.py b/pcs/test/tools/misc.py
+index a78ccdc..745b228 100644
+--- a/pcs/test/tools/misc.py
++++ b/pcs/test/tools/misc.py
+@@ -10,6 +10,7 @@ import os.path
+ import re
+ 
+ from pcs import utils
++from pcs.test.tools.pcs_unittest import mock
+ 
+ 
+ testdir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+@@ -50,3 +51,16 @@ def is_minimum_pacemaker_version(cmajor, cminor, crev):
+         or
+         (major == cmajor and minor == cminor and rev >= crev)
+     )
++
++def create_patcher(target_prefix):
++    """
++    Return function for patching tests with preconfigured target prefix
++    string target_prefix is prefix for patched names. Typicaly tested module
++    like for example "pcs.lib.commands.booth". Between target_prefix and target
++    is "." (dot)
++    """
++    def patch(target, *args, **kwargs):
++        return mock.patch(
++            "{0}.{1}".format(target_prefix, target), *args, **kwargs
++        )
++    return patch
+diff --git a/pcs/test/tools/pcs_mock.py b/pcs/test/tools/pcs_mock.py
+deleted file mode 100644
+index d84ac67..0000000
+--- a/pcs/test/tools/pcs_mock.py
++++ /dev/null
+@@ -1,13 +0,0 @@
+-try:
+-    import unittest.mock as mock
+-except ImportError:
+-    import mock
+-
+-if not hasattr(mock.Mock, "assert_not_called"):
+-    def __assert_not_called(self, *args, **kwargs):
+-        if self.call_count != 0:
+-            msg = ("Expected '%s' to not have been called. Called %s times." %
+-                   (self._mock_name or 'mock', self.call_count))
+-            raise AssertionError(msg)
+-    mock.Mock.assert_not_called = __assert_not_called
+-
+diff --git a/pcs/test/tools/pcs_unittest.py b/pcs/test/tools/pcs_unittest.py
+index 4a3205d..af549ae 100644
+--- a/pcs/test/tools/pcs_unittest.py
++++ b/pcs/test/tools/pcs_unittest.py
+@@ -1,7 +1,26 @@
+ import sys
++#In package unittest there is no module mock before python 3.3. In python 3
++#module mock is not imported by * because module mock is not imported in
++#unittest/__init__.py
+ major, minor = sys.version_info[:2]
+ if major == 2 and minor == 6:
++    #we use features that are missing before 2.7 (like test skipping,
++    #assertRaises as context manager...) so we need unittest2
+     from unittest2 import *
++    import mock
+ else:
+     from unittest import *
++    try:
++        import unittest.mock as mock
++    except ImportError:
++        import mock
+ del major, minor, sys
++
++#backport of assert_not_called (new in version 3.5)
++if not hasattr(mock.Mock, "assert_not_called"):
++    def __assert_not_called(self, *args, **kwargs):
++        if self.call_count != 0:
++            msg = ("Expected '%s' to not have been called. Called %s times." %
++                   (self._mock_name or 'mock', self.call_count))
++            raise AssertionError(msg)
++    mock.Mock.assert_not_called = __assert_not_called
+-- 
+1.8.3.1
+

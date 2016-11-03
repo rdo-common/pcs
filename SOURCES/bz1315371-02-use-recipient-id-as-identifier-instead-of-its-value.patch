@@ -1,0 +1,1638 @@
+From 8eef21a7bbfdcba709515529a40fadc1f5386b70 Mon Sep 17 00:00:00 2001
+From: Ondrej Mular <omular@redhat.com>
+Date: Fri, 8 Jul 2016 16:43:16 +0200
+Subject: [PATCH 1/2] lib: use recipient id as identifier instead of its value
+
+---
+ pcs/common/report_codes.py          |   3 +-
+ pcs/lib/cib/alert.py                | 129 +++++++----
+ pcs/lib/cib/test/test_alert.py      | 449 +++++++++++++++++++++++++++++++-----
+ pcs/lib/commands/alert.py           |  45 +++-
+ pcs/lib/commands/test/test_alert.py | 111 ++++++---
+ pcs/lib/reports.py                  |  29 ++-
+ 6 files changed, 597 insertions(+), 169 deletions(-)
+
+diff --git a/pcs/common/report_codes.py b/pcs/common/report_codes.py
+index 2b39938..53f2ccb 100644
+--- a/pcs/common/report_codes.py
++++ b/pcs/common/report_codes.py
+@@ -7,6 +7,7 @@ from __future__ import (
+ 
+ # force cathegories
+ FORCE_ACTIVE_RRP = "ACTIVE_RRP"
++FORCE_ALERT_RECIPIENT_VALUE_NOT_UNIQUE = "FORCE_ALERT_RECIPIENT_VALUE_NOT_UNIQUE"
+ FORCE_CONSTRAINT_DUPLICATE = "CONSTRAINT_DUPLICATE"
+ FORCE_CONSTRAINT_MULTIINSTANCE_RESOURCE = "CONSTRAINT_MULTIINSTANCE_RESOURCE"
+ FORCE_LOAD_THRESHOLD = "LOAD_THRESHOLD"
+@@ -22,7 +23,7 @@ AGENT_NOT_FOUND = "AGENT_NOT_FOUND"
+ BAD_CLUSTER_STATE_FORMAT = 'BAD_CLUSTER_STATE_FORMAT'
+ CIB_ALERT_NOT_FOUND = "CIB_ALERT_NOT_FOUND"
+ CIB_ALERT_RECIPIENT_ALREADY_EXISTS = "CIB_ALERT_RECIPIENT_ALREADY_EXISTS"
+-CIB_ALERT_RECIPIENT_NOT_FOUND = "CIB_ALERT_RECIPIENT_NOT_FOUND"
++CIB_ALERT_RECIPIENT_VALUE_INVALID = "CIB_ALERT_RECIPIENT_VALUE_INVALID"
+ CIB_CANNOT_FIND_MANDATORY_SECTION = "CIB_CANNOT_FIND_MANDATORY_SECTION"
+ CIB_LOAD_ERROR_BAD_FORMAT = "CIB_LOAD_ERROR_BAD_FORMAT"
+ CIB_LOAD_ERROR = "CIB_LOAD_ERROR"
+diff --git a/pcs/lib/cib/alert.py b/pcs/lib/cib/alert.py
+index 6b72996..b5fe88c 100644
+--- a/pcs/lib/cib/alert.py
++++ b/pcs/lib/cib/alert.py
+@@ -7,14 +7,16 @@ from __future__ import (
+ 
+ from lxml import etree
+ 
++from pcs.common import report_codes
+ from pcs.lib import reports
+-from pcs.lib.errors import LibraryError
++from pcs.lib.errors import LibraryError, ReportItemSeverity as Severities
+ from pcs.lib.cib.nvpair import update_nvset, get_nvset
+ from pcs.lib.cib.tools import (
+     check_new_id_applicable,
+     get_sub_element,
+     find_unique_id,
+     get_alerts,
++    validate_id_does_not_exist,
+ )
+ 
+ 
+@@ -61,7 +63,7 @@ def _update_optional_attribute(element, attribute, value):
+ def get_alert_by_id(tree, alert_id):
+     """
+     Returns alert element with specified id.
+-    Raises AlertNotFound if alert with specified id doesn't exist.
++    Raises LibraryError if alert with specified id doesn't exist.
+ 
+     tree -- cib etree node
+     alert_id -- id of alert
+@@ -72,25 +74,53 @@ def get_alert_by_id(tree, alert_id):
+     return alert
+ 
+ 
+-def get_recipient(alert, recipient_value):
++def get_recipient_by_id(tree, recipient_id):
+     """
+     Returns recipient element with value recipient_value which belong to
+     specified alert.
+-    Raises RecipientNotFound if recipient doesn't exist.
++    Raises LibraryError if recipient doesn't exist.
+ 
+-    alert -- parent element of required recipient
+-    recipient_value -- value of recipient
++    tree -- cib etree node
++    recipient_id -- id of recipient
+     """
+-    recipient = alert.find(
+-        "./recipient[@value='{0}']".format(recipient_value)
++    recipient = get_alerts(tree).find(
++        "./alert/recipient[@id='{0}']".format(recipient_id)
+     )
+     if recipient is None:
+-        raise LibraryError(reports.cib_alert_recipient_not_found(
+-            alert.get("id"), recipient_value
+-        ))
++        raise LibraryError(reports.id_not_found(recipient_id, "Recipient"))
+     return recipient
+ 
+ 
++def ensure_recipient_value_is_unique(
++    reporter, alert, recipient_value, recipient_id="", allow_duplicity=False
++):
++    """
++    Ensures that recipient_value is unique in alert.
++
++    reporter -- report processor
++    alert -- alert
++    recipient_value -- recipient value
++    recipient_id -- recipient id of to which value belongs to
++    allow_duplicity -- if True only warning will be shown if value already
++        exists
++    """
++    recipient_list = alert.xpath(
++        "./recipient[@value='{value}' and @id!='{id}']".format(
++            value=recipient_value, id=recipient_id
++        )
++    )
++    if recipient_list:
++        reporter.process(reports.cib_alert_recipient_already_exists(
++            alert.get("id", None),
++            recipient_value,
++            Severities.WARNING if allow_duplicity else Severities.ERROR,
++            forceable=(
++                None if allow_duplicity
++                else report_codes.FORCE_ALERT_RECIPIENT_VALUE_NOT_UNIQUE
++            )
++        ))
++
++
+ def create_alert(tree, alert_id, path, description=""):
+     """
+     Create new alert element. Returns newly created element.
+@@ -116,7 +146,7 @@ def create_alert(tree, alert_id, path, description=""):
+ def update_alert(tree, alert_id, path, description=None):
+     """
+     Update existing alert. Return updated alert element.
+-    Raises AlertNotFound if alert with specified id doesn't exist.
++    Raises LibraryError if alert with specified id doesn't exist.
+ 
+     tree -- cib etree node
+     alert_id -- id of alert to be updated
+@@ -134,7 +164,7 @@ def update_alert(tree, alert_id, path, description=None):
+ def remove_alert(tree, alert_id):
+     """
+     Remove alert with specified id.
+-    Raises AlertNotFound if alert with specified id doesn't exist.
++    Raises LibraryError if alert with specified id doesn't exist.
+ 
+     tree -- cib etree node
+     alert_id -- id of alert which should be removed
+@@ -144,36 +174,38 @@ def remove_alert(tree, alert_id):
+ 
+ 
+ def add_recipient(
++    reporter,
+     tree,
+     alert_id,
+     recipient_value,
+-    description=""
++    recipient_id=None,
++    description="",
++    allow_same_value=False
+ ):
+     """
+     Add recipient to alert with specified id. Returns added recipient element.
+-    Raises AlertNotFound if alert with specified id doesn't exist.
++    Raises LibraryError if alert with specified recipient_id doesn't exist.
+     Raises LibraryError if recipient already exists.
+ 
++    reporter -- report processor
+     tree -- cib etree node
+     alert_id -- id of alert which should be parent of new recipient
+     recipient_value -- value of recipient
++    recipient_id -- id of new recipient, if None it will be generated
+     description -- description of recipient
++    allow_same_value -- if True unique recipient value is not required
+     """
+-    alert = get_alert_by_id(tree, alert_id)
++    if recipient_id is None:
++        recipient_id = find_unique_id(tree, "{0}-recipient".format(alert_id))
++    else:
++        validate_id_does_not_exist(tree, recipient_id)
+ 
+-    recipient = alert.find(
+-        "./recipient[@value='{0}']".format(recipient_value)
++    alert = get_alert_by_id(tree, alert_id)
++    ensure_recipient_value_is_unique(
++        reporter, alert, recipient_value, allow_duplicity=allow_same_value
+     )
+-    if recipient is not None:
+-        raise LibraryError(reports.cib_alert_recipient_already_exists(
+-            alert_id, recipient_value
+-        ))
+-
+     recipient = etree.SubElement(
+-        alert,
+-        "recipient",
+-        id=find_unique_id(tree, "{0}-recipient".format(alert_id)),
+-        value=recipient_value
++        alert, "recipient", id=recipient_id, value=recipient_value
+     )
+ 
+     if description:
+@@ -182,38 +214,49 @@ def add_recipient(
+     return recipient
+ 
+ 
+-def update_recipient(tree, alert_id, recipient_value, description):
++def update_recipient(
++    reporter,
++    tree,
++    recipient_id,
++    recipient_value=None,
++    description=None,
++    allow_same_value=False
++):
+     """
+     Update specified recipient. Returns updated recipient element.
+-    Raises AlertNotFound if alert with specified id doesn't exist.
+-    Raises RecipientNotFound if recipient doesn't exist.
++    Raises LibraryError if recipient doesn't exist.
+ 
++    reporter -- report processor
+     tree -- cib etree node
+-    alert_id -- id of alert, parent element of recipient
+-    recipient_value -- recipient value
++    recipient_id -- id of recipient to be updated
++    recipient_value -- recipient value, stay unchanged if None
+     description -- description, if empty it will be removed, stay unchanged
+         if None
++    allow_same_value -- if True unique recipient value is not required
+     """
+-    recipient = get_recipient(
+-        get_alert_by_id(tree, alert_id), recipient_value
+-    )
++    recipient = get_recipient_by_id(tree, recipient_id)
++    if recipient_value is not None:
++        ensure_recipient_value_is_unique(
++            reporter,
++            recipient.getparent(),
++            recipient_value,
++            recipient_id=recipient_id,
++            allow_duplicity=allow_same_value
++        )
++        recipient.set("value", recipient_value)
+     _update_optional_attribute(recipient, "description", description)
+     return recipient
+ 
+ 
+-def remove_recipient(tree, alert_id, recipient_value):
++def remove_recipient(tree, recipient_id):
+     """
+     Remove specified recipient.
+-    Raises AlertNotFound if alert with specified id doesn't exist.
+-    Raises RecipientNotFound if recipient doesn't exist.
++    Raises LibraryError if recipient doesn't exist.
+ 
+     tree -- cib etree node
+-    alert_id -- id of alert, parent element of recipient
+-    recipient_value -- recipient value
++    recipient_id -- id of recipient to be removed
+     """
+-    recipient = get_recipient(
+-        get_alert_by_id(tree, alert_id), recipient_value
+-    )
++    recipient = get_recipient_by_id(tree, recipient_id)
+     recipient.getparent().remove(recipient)
+ 
+ 
+diff --git a/pcs/lib/cib/test/test_alert.py b/pcs/lib/cib/test/test_alert.py
+index c387aaf..50eaef6 100644
+--- a/pcs/lib/cib/test/test_alert.py
++++ b/pcs/lib/cib/test/test_alert.py
+@@ -15,8 +15,10 @@ from pcs.lib.errors import ReportItemSeverity as severities
+ from pcs.test.tools.assertions import(
+     assert_raise_library_error,
+     assert_xml_equal,
++    assert_report_item_list_equal,
+ )
+ from pcs.test.tools.pcs_mock import mock
++from pcs.test.tools.custom_mock import MockLibraryReportProcessor
+ 
+ 
+ @mock.patch("pcs.lib.cib.alert.update_nvset")
+@@ -129,54 +131,146 @@ class GetAlertByIdTest(TestCase):
+         )
+ 
+ 
+-class GetRecipientTest(TestCase):
++class GetRecipientByIdTest(TestCase):
+     def setUp(self):
+         self.xml = etree.XML(
+             """
+-                <alert id="alert-1">
+-                    <recipient id="rec-1" value="value1"/>
+-                    <recipient id="rec-2" value="value2"/>
+-                    <not_recipient value="value3"/>
+-                    <recipients>
+-                        <recipient id="rec-4" value="value4"/>
+-                    </recipients>
+-                </alert>
++                <cib>
++                    <configuration>
++                        <alerts>
++                            <alert id="alert-1">
++                                <recipient id="rec-1" value="value1"/>
++                                <not_recipient id="rec-3" value="value3"/>
++                                <recipients>
++                                    <recipient id="rec-4" value="value4"/>
++                                </recipients>
++                            </alert>
++                            <recipient id="rec-2" value="value2"/>
++                        </alerts>
++                        <alert id="alert-2"/>
++                    </configuration>
++                </cib>
+             """
+         )
+ 
+     def test_exist(self):
+         assert_xml_equal(
+-            '<recipient id="rec-2" value="value2"/>',
+-            etree.tostring(alert.get_recipient(self.xml, "value2")).decode()
++            '<recipient id="rec-1" value="value1"/>',
++            etree.tostring(
++                alert.get_recipient_by_id(self.xml, "rec-1")
++            ).decode()
+         )
+ 
+     def test_different_place(self):
+         assert_raise_library_error(
+-            lambda: alert.get_recipient(self.xml, "value4"),
++            lambda: alert.get_recipient_by_id(self.xml, "rec-4"),
+             (
+                 severities.ERROR,
+-                report_codes.CIB_ALERT_RECIPIENT_NOT_FOUND,
++                report_codes.ID_NOT_FOUND,
+                 {
+-                    "alert": "alert-1",
+-                    "recipient": "value4"
++                    "id": "rec-4",
++                    "id_description": "Recipient"
++                }
++            )
++        )
++
++    def test_not_in_alert(self):
++        assert_raise_library_error(
++            lambda: alert.get_recipient_by_id(self.xml, "rec-2"),
++            (
++                severities.ERROR,
++                report_codes.ID_NOT_FOUND,
++                {
++                    "id": "rec-2",
++                    "id_description": "Recipient"
+                 }
+             )
+         )
+ 
+     def test_not_recipient(self):
+         assert_raise_library_error(
+-            lambda: alert.get_recipient(self.xml, "value3"),
++            lambda: alert.get_recipient_by_id(self.xml, "rec-3"),
+             (
+                 severities.ERROR,
+-                report_codes.CIB_ALERT_RECIPIENT_NOT_FOUND,
++                report_codes.ID_NOT_FOUND,
+                 {
+-                    "alert": "alert-1",
+-                    "recipient": "value3"
++                    "id": "rec-3",
++                    "id_description": "Recipient"
+                 }
+             )
+         )
+ 
+ 
++class EnsureRecipientValueIsUniqueTest(TestCase):
++    def setUp(self):
++        self.mock_reporter = MockLibraryReportProcessor()
++        self.alert = etree.Element("alert", id="alert-1")
++        self.recipient = etree.SubElement(
++            self.alert, "recipient", id="rec-1", value="value1"
++        )
++
++    def test_is_unique_no_duplicity_allowed(self):
++        alert.ensure_recipient_value_is_unique(
++            self.mock_reporter, self.alert, "value2"
++        )
++        self.assertEqual(0, len(self.mock_reporter.report_item_list))
++
++    def test_same_recipient_no_duplicity_allowed(self):
++        alert.ensure_recipient_value_is_unique(
++            self.mock_reporter, self.alert, "value1", recipient_id="rec-1"
++        )
++        self.assertEqual(0, len(self.mock_reporter.report_item_list))
++
++    def test_same_recipient_duplicity_allowed(self):
++        alert.ensure_recipient_value_is_unique(
++            self.mock_reporter, self.alert, "value1", recipient_id="rec-1",
++            allow_duplicity=True
++        )
++        self.assertEqual(0, len(self.mock_reporter.report_item_list))
++
++    def test_not_unique_no_duplicity_allowed(self):
++        report_item = (
++            severities.ERROR,
++            report_codes.CIB_ALERT_RECIPIENT_ALREADY_EXISTS,
++            {
++                "alert": "alert-1",
++                "recipient": "value1"
++            },
++            report_codes.FORCE_ALERT_RECIPIENT_VALUE_NOT_UNIQUE
++        )
++        assert_raise_library_error(
++            lambda: alert.ensure_recipient_value_is_unique(
++                self.mock_reporter, self.alert, "value1"
++            ),
++            report_item
++        )
++        assert_report_item_list_equal(
++            self.mock_reporter.report_item_list, [report_item]
++        )
++
++    def test_is_unique_duplicity_allowed(self):
++        alert.ensure_recipient_value_is_unique(
++            self.mock_reporter, self.alert, "value2", allow_duplicity=True
++        )
++        self.assertEqual(0, len(self.mock_reporter.report_item_list))
++
++    def test_not_unique_duplicity_allowed(self):
++        alert.ensure_recipient_value_is_unique(
++            self.mock_reporter, self.alert, "value1", allow_duplicity=True
++        )
++        assert_report_item_list_equal(
++            self.mock_reporter.report_item_list,
++            [(
++                severities.WARNING,
++                report_codes.CIB_ALERT_RECIPIENT_ALREADY_EXISTS,
++                {
++                    "alert": "alert-1",
++                    "recipient": "value1"
++                }
++            )]
++        )
++
++
+ class CreateAlertTest(TestCase):
+     def setUp(self):
+         self.tree = etree.XML(
+@@ -462,6 +556,7 @@ class RemoveAlertTest(TestCase):
+ 
+ class AddRecipientTest(TestCase):
+     def setUp(self):
++        self.mock_reporter = MockLibraryReportProcessor()
+         self.tree = etree.XML(
+             """
+             <cib>
+@@ -476,11 +571,40 @@ class AddRecipientTest(TestCase):
+             """
+         )
+ 
+-    def test_success(self):
++    def test_with_id(self):
++        assert_xml_equal(
++            '<recipient id="my-recipient" value="value1"/>',
++            etree.tostring(
++                alert.add_recipient(
++                    self.mock_reporter, self.tree, "alert", "value1",
++                    "my-recipient"
++                )
++            ).decode()
++        )
++        assert_xml_equal(
++            """
++            <cib>
++                <configuration>
++                    <alerts>
++                        <alert id="alert" path="/path">
++                            <recipient id="alert-recipient" value="test_val"/>
++                            <recipient id="my-recipient" value="value1"/>
++                        </alert>
++                    </alerts>
++                </configuration>
++            </cib>
++            """,
++            etree.tostring(self.tree).decode()
++        )
++        self.assertEqual([], self.mock_reporter.report_item_list)
++
++    def test_without_id(self):
+         assert_xml_equal(
+             '<recipient id="alert-recipient-1" value="value1"/>',
+             etree.tostring(
+-                alert.add_recipient(self.tree, "alert", "value1")
++                alert.add_recipient(
++                    self.mock_reporter, self.tree, "alert", "value1"
++                )
+             ).decode()
+         )
+         assert_xml_equal(
+@@ -498,23 +622,85 @@ class AddRecipientTest(TestCase):
+             """,
+             etree.tostring(self.tree).decode()
+         )
++        self.assertEqual([], self.mock_reporter.report_item_list)
+ 
+-    def test_recipient_exist(self):
++    def test_id_exists(self):
+         assert_raise_library_error(
+-            lambda: alert.add_recipient(self.tree, "alert", "test_val"),
++            lambda: alert.add_recipient(
++                self.mock_reporter, self.tree, "alert", "value1",
++                "alert-recipient"
++            ),
+             (
+                 severities.ERROR,
++                report_codes.ID_ALREADY_EXISTS,
++                {"id": "alert-recipient"}
++            )
++        )
++        self.assertEqual([], self.mock_reporter.report_item_list)
++
++    def test_duplicity_of_value_not_allowed(self):
++        report_item = (
++            severities.ERROR,
++            report_codes.CIB_ALERT_RECIPIENT_ALREADY_EXISTS,
++            {
++                "alert": "alert",
++                "recipient": "test_val"
++            },
++            report_codes.FORCE_ALERT_RECIPIENT_VALUE_NOT_UNIQUE
++        )
++        assert_raise_library_error(
++            lambda: alert.add_recipient(
++                self.mock_reporter, self.tree, "alert", "test_val"
++            ),
++            report_item
++        )
++        assert_report_item_list_equal(
++            self.mock_reporter.report_item_list,
++            [report_item]
++        )
++
++    def test_duplicity_of_value_allowed(self):
++        assert_xml_equal(
++            '<recipient id="alert-recipient-1" value="test_val"/>',
++            etree.tostring(
++                alert.add_recipient(
++                    self.mock_reporter, self.tree, "alert", "test_val",
++                    allow_same_value=True
++                )
++            ).decode()
++        )
++        assert_xml_equal(
++            """
++            <cib>
++                <configuration>
++                    <alerts>
++                        <alert id="alert" path="/path">
++                            <recipient id="alert-recipient" value="test_val"/>
++                            <recipient id="alert-recipient-1" value="test_val"/>
++                        </alert>
++                    </alerts>
++                </configuration>
++            </cib>
++            """,
++            etree.tostring(self.tree).decode()
++        )
++        assert_report_item_list_equal(
++            self.mock_reporter.report_item_list,
++            [(
++                severities.WARNING,
+                 report_codes.CIB_ALERT_RECIPIENT_ALREADY_EXISTS,
+                 {
+-                    "recipient": "test_val",
+-                    "alert": "alert"
++                    "alert": "alert",
++                    "recipient": "test_val"
+                 }
+-            )
++            )]
+         )
+ 
+     def test_alert_not_exist(self):
+         assert_raise_library_error(
+-            lambda: alert.add_recipient(self.tree, "alert1", "test_val"),
++            lambda: alert.add_recipient(
++                self.mock_reporter, self.tree, "alert1", "test_val"
++            ),
+             (
+                 severities.ERROR,
+                 report_codes.CIB_ALERT_NOT_FOUND,
+@@ -532,7 +718,8 @@ class AddRecipientTest(TestCase):
+             />
+             """,
+             etree.tostring(alert.add_recipient(
+-                self.tree, "alert", "value1", "desc"
++                self.mock_reporter, self.tree, "alert", "value1",
++                description="desc"
+             )).decode()
+         )
+         assert_xml_equal(
+@@ -554,10 +741,12 @@ class AddRecipientTest(TestCase):
+             """,
+             etree.tostring(self.tree).decode()
+         )
++        self.assertEqual([], self.mock_reporter.report_item_list)
+ 
+ 
+ class UpdateRecipientTest(TestCase):
+     def setUp(self):
++        self.mock_reporter = MockLibraryReportProcessor()
+         self.tree = etree.XML(
+             """
+             <cib>
+@@ -577,6 +766,157 @@ class UpdateRecipientTest(TestCase):
+             """
+         )
+ 
++    def test_update_value(self):
++        assert_xml_equal(
++            """
++            <recipient id="alert-recipient" value="new_val"/>
++            """,
++            etree.tostring(alert.update_recipient(
++                self.mock_reporter, self.tree, "alert-recipient",
++                recipient_value="new_val"
++            )).decode()
++        )
++        assert_xml_equal(
++            """
++            <cib>
++                <configuration>
++                    <alerts>
++                        <alert id="alert" path="/path">
++                            <recipient id="alert-recipient" value="new_val"/>
++                            <recipient
++                                id="alert-recipient-1"
++                                value="value1"
++                                description="desc"
++                            />
++                        </alert>
++                    </alerts>
++                </configuration>
++            </cib>
++            """,
++            etree.tostring(self.tree).decode()
++        )
++        self.assertEqual([], self.mock_reporter.report_item_list)
++
++    def test_update_same_value_no_duplicity_allowed(self):
++        assert_xml_equal(
++            '<recipient id="alert-recipient" value="test_val"/>',
++            etree.tostring(alert.update_recipient(
++                self.mock_reporter, self.tree, "alert-recipient",
++                recipient_value="test_val"
++            )).decode()
++        )
++        assert_xml_equal(
++            """
++            <cib>
++                <configuration>
++                    <alerts>
++                        <alert id="alert" path="/path">
++                            <recipient id="alert-recipient" value="test_val"/>
++                            <recipient
++                                id="alert-recipient-1"
++                                value="value1"
++                                description="desc"
++                            />
++                        </alert>
++                    </alerts>
++                </configuration>
++            </cib>
++            """,
++            etree.tostring(self.tree).decode()
++        )
++        self.assertEqual([], self.mock_reporter.report_item_list)
++
++    def test_update_same_value_duplicity_allowed(self):
++        assert_xml_equal(
++            '<recipient id="alert-recipient" value="test_val"/>',
++            etree.tostring(alert.update_recipient(
++                self.mock_reporter, self.tree, "alert-recipient",
++                recipient_value="test_val", allow_same_value=True
++            )).decode()
++        )
++        assert_xml_equal(
++            """
++            <cib>
++                <configuration>
++                    <alerts>
++                        <alert id="alert" path="/path">
++                            <recipient id="alert-recipient" value="test_val"/>
++                            <recipient
++                                id="alert-recipient-1"
++                                value="value1"
++                                description="desc"
++                            />
++                        </alert>
++                    </alerts>
++                </configuration>
++            </cib>
++            """,
++            etree.tostring(self.tree).decode()
++        )
++        self.assertEqual([], self.mock_reporter.report_item_list)
++
++    def test_duplicity_of_value_not_allowed(self):
++        report_item = (
++            severities.ERROR,
++            report_codes.CIB_ALERT_RECIPIENT_ALREADY_EXISTS,
++            {
++                "alert": "alert",
++                "recipient": "value1"
++            },
++            report_codes.FORCE_ALERT_RECIPIENT_VALUE_NOT_UNIQUE
++        )
++        assert_raise_library_error(
++            lambda: alert.update_recipient(
++                self.mock_reporter, self.tree, "alert-recipient", "value1"
++            ),
++            report_item
++        )
++        assert_report_item_list_equal(
++            self.mock_reporter.report_item_list,
++            [report_item]
++        )
++
++    def test_duplicity_of_value_allowed(self):
++        assert_xml_equal(
++            """
++            <recipient id="alert-recipient" value="value1"/>
++            """,
++            etree.tostring(alert.update_recipient(
++                self.mock_reporter, self.tree, "alert-recipient",
++                recipient_value="value1", allow_same_value=True
++            )).decode()
++        )
++        assert_xml_equal(
++            """
++            <cib>
++                <configuration>
++                    <alerts>
++                        <alert id="alert" path="/path">
++                            <recipient id="alert-recipient" value="value1"/>
++                            <recipient
++                                id="alert-recipient-1"
++                                value="value1"
++                                description="desc"
++                            />
++                        </alert>
++                    </alerts>
++                </configuration>
++            </cib>
++            """,
++            etree.tostring(self.tree).decode()
++        )
++        assert_report_item_list_equal(
++            self.mock_reporter.report_item_list,
++            [(
++                severities.WARNING,
++                report_codes.CIB_ALERT_RECIPIENT_ALREADY_EXISTS,
++                {
++                    "alert": "alert",
++                    "recipient": "value1"
++                }
++            )]
++        )
++
+     def test_add_description(self):
+         assert_xml_equal(
+             """
+@@ -585,7 +925,8 @@ class UpdateRecipientTest(TestCase):
+             />
+             """,
+             etree.tostring(alert.update_recipient(
+-                self.tree, "alert", "test_val", "description"
++                self.mock_reporter, self.tree, "alert-recipient",
++                description="description"
+             )).decode()
+         )
+         assert_xml_equal(
+@@ -611,6 +952,7 @@ class UpdateRecipientTest(TestCase):
+             """,
+             etree.tostring(self.tree).decode()
+         )
++        self.assertEqual([], self.mock_reporter.report_item_list)
+ 
+     def test_update_description(self):
+         assert_xml_equal(
+@@ -620,7 +962,8 @@ class UpdateRecipientTest(TestCase):
+             />
+             """,
+             etree.tostring(alert.update_recipient(
+-                self.tree, "alert", "value1", "description"
++                self.mock_reporter, self.tree, "alert-recipient-1",
++                description="description"
+             )).decode()
+         )
+         assert_xml_equal(
+@@ -642,6 +985,7 @@ class UpdateRecipientTest(TestCase):
+             """,
+             etree.tostring(self.tree).decode()
+         )
++        self.assertEqual([], self.mock_reporter.report_item_list)
+ 
+     def test_remove_description(self):
+         assert_xml_equal(
+@@ -649,7 +993,10 @@ class UpdateRecipientTest(TestCase):
+                 <recipient id="alert-recipient-1" value="value1"/>
+             """,
+             etree.tostring(
+-               alert.update_recipient(self.tree, "alert", "value1", "")
++               alert.update_recipient(
++                   self.mock_reporter, self.tree, "alert-recipient-1",
++                   description=""
++               )
+             ).decode()
+         )
+         assert_xml_equal(
+@@ -667,26 +1014,18 @@ class UpdateRecipientTest(TestCase):
+             """,
+             etree.tostring(self.tree).decode()
+         )
+-
+-    def test_alert_not_exists(self):
+-        assert_raise_library_error(
+-            lambda: alert.update_recipient(self.tree, "alert1", "test_val", ""),
+-            (
+-                severities.ERROR,
+-                report_codes.CIB_ALERT_NOT_FOUND,
+-                {"alert": "alert1"}
+-            )
+-        )
++        self.assertEqual([], self.mock_reporter.report_item_list)
+ 
+     def test_recipient_not_exists(self):
+         assert_raise_library_error(
+-            lambda: alert.update_recipient(self.tree, "alert", "unknown", ""),
++            lambda: alert.update_recipient(
++                self.mock_reporter, self.tree, "recipient"),
+             (
+                 severities.ERROR,
+-                report_codes.CIB_ALERT_RECIPIENT_NOT_FOUND,
++                report_codes.ID_NOT_FOUND,
+                 {
+-                    "alert": "alert",
+-                    "recipient": "unknown"
++                    "id": "recipient",
++                    "id_description": "Recipient"
+                 }
+             )
+         )
+@@ -710,7 +1049,7 @@ class RemoveRecipientTest(TestCase):
+         )
+ 
+     def test_success(self):
+-        alert.remove_recipient(self.tree, "alert", "val")
++        alert.remove_recipient(self.tree, "alert-recipient-2")
+         assert_xml_equal(
+             """
+             <cib>
+@@ -726,25 +1065,15 @@ class RemoveRecipientTest(TestCase):
+             etree.tostring(self.tree).decode()
+         )
+ 
+-    def test_alert_not_exists(self):
+-        assert_raise_library_error(
+-            lambda: alert.remove_recipient(self.tree, "alert1", "test_val"),
+-            (
+-                severities.ERROR,
+-                report_codes.CIB_ALERT_NOT_FOUND,
+-                {"alert": "alert1"}
+-            )
+-        )
+-
+     def test_recipient_not_exists(self):
+         assert_raise_library_error(
+-            lambda: alert.remove_recipient(self.tree, "alert", "unknown"),
++            lambda: alert.remove_recipient(self.tree, "recipient"),
+             (
+                 severities.ERROR,
+-                report_codes.CIB_ALERT_RECIPIENT_NOT_FOUND,
++                report_codes.ID_NOT_FOUND,
+                 {
+-                    "alert": "alert",
+-                    "recipient": "unknown"
++                    "id": "recipient",
++                    "id_description": "Recipient"
+                 }
+             )
+         )
+diff --git a/pcs/lib/commands/alert.py b/pcs/lib/commands/alert.py
+index 7371fbc..432d9d5 100644
+--- a/pcs/lib/commands/alert.py
++++ b/pcs/lib/commands/alert.py
+@@ -90,7 +90,9 @@ def add_recipient(
+     recipient_value,
+     instance_attribute_dict,
+     meta_attribute_dict,
+-    description=None
++    recipient_id=None,
++    description=None,
++    allow_same_value=False
+ ):
+     """
+     Add new recipient to alert witch id alert_id.
+@@ -100,7 +102,9 @@ def add_recipient(
+     recipient_value -- value of new recipient
+     instance_attribute_dict -- dictionary of instance attributes to update
+     meta_attribute_dict -- dictionary of meta attributes to update
++    recipient_id -- id of new recipient, if None it will be generated
+     description -- recipient description
++    allow_same_value -- if True unique recipient value is not required
+     """
+     if not recipient_value:
+         raise LibraryError(
+@@ -109,7 +113,13 @@ def add_recipient(
+ 
+     cib = lib_env.get_cib(REQUIRED_CIB_VERSION)
+     recipient = alert.add_recipient(
+-        cib, alert_id, recipient_value, description
++        lib_env.report_processor,
++        cib,
++        alert_id,
++        recipient_value,
++        recipient_id=recipient_id,
++        description=description,
++        allow_same_value=allow_same_value
+     )
+     alert.update_instance_attributes(cib, recipient, instance_attribute_dict)
+     alert.update_meta_attributes(cib, recipient, meta_attribute_dict)
+@@ -119,26 +129,38 @@ def add_recipient(
+ 
+ def update_recipient(
+     lib_env,
+-    alert_id,
+-    recipient_value,
++    recipient_id,
+     instance_attribute_dict,
+     meta_attribute_dict,
+-    description=None
++    recipient_value=None,
++    description=None,
++    allow_same_value=False
+ ):
+     """
+     Update existing recipient.
+ 
+     lib_env -- LibraryEnvironment
+-    alert_id -- id of alert to which recipient belong
+-    recipient_value -- recipient to be updated
++    recipient_id -- id of recipient to be updated
+     instance_attribute_dict -- dictionary of instance attributes to update
+     meta_attribute_dict -- dictionary of meta attributes to update
++    recipient_value -- new recipient value, if None old value will stay
++        unchanged
+     description -- new description, if empty string, old description will be
+         deleted, if None old value will stay unchanged
++    allow_same_value -- if True unique recipient value is not required
+     """
++    if not recipient_value and recipient_value is not None:
++        raise LibraryError(
++            reports.cib_alert_recipient_invalid_value(recipient_value)
++        )
+     cib = lib_env.get_cib(REQUIRED_CIB_VERSION)
+     recipient = alert.update_recipient(
+-        cib, alert_id, recipient_value, description
++        lib_env.report_processor,
++        cib,
++        recipient_id,
++        recipient_value=recipient_value,
++        description=description,
++        allow_same_value=allow_same_value
+     )
+     alert.update_instance_attributes(cib, recipient, instance_attribute_dict)
+     alert.update_meta_attributes(cib, recipient, meta_attribute_dict)
+@@ -146,16 +168,15 @@ def update_recipient(
+     lib_env.push_cib(cib)
+ 
+ 
+-def remove_recipient(lib_env, alert_id, recipient_value):
++def remove_recipient(lib_env, recipient_id):
+     """
+     Remove existing recipient.
+ 
+     lib_env -- LibraryEnvironment
+-    alert_id -- id of alert to which recipient belong
+-    recipient_value -- recipient to be removed
++    recipient_id -- if of recipient to be removed
+     """
+     cib = lib_env.get_cib(REQUIRED_CIB_VERSION)
+-    alert.remove_recipient(cib, alert_id, recipient_value)
++    alert.remove_recipient(cib, recipient_id)
+     lib_env.push_cib(cib)
+ 
+ 
+diff --git a/pcs/lib/commands/test/test_alert.py b/pcs/lib/commands/test/test_alert.py
+index 34813df..bced45e 100644
+--- a/pcs/lib/commands/test/test_alert.py
++++ b/pcs/lib/commands/test/test_alert.py
+@@ -361,19 +361,17 @@ class AddRecipientTest(TestCase):
+     def test_recipient_already_exists(self):
+         assert_raise_library_error(
+             lambda: cmd_alert.add_recipient(
+-                self.mock_env, "alert", "value1", {}, {}
++                self.mock_env, "alert", "value1", {}, {},
++                recipient_id="alert-recipient"
+             ),
+             (
+                 Severities.ERROR,
+-                report_codes.CIB_ALERT_RECIPIENT_ALREADY_EXISTS,
+-                {
+-                    "recipient": "value1",
+-                    "alert": "alert"
+-                }
++                report_codes.ID_ALREADY_EXISTS,
++                {"id": "alert-recipient"}
+             )
+         )
+ 
+-    def test_success(self):
++    def test_without_id(self):
+         cmd_alert.add_recipient(
+             self.mock_env,
+             "alert",
+@@ -424,6 +422,58 @@ class AddRecipientTest(TestCase):
+             self.mock_env._get_cib_xml()
+         )
+ 
++    def test_with_id(self):
++        cmd_alert.add_recipient(
++            self.mock_env,
++            "alert",
++            "value",
++            {"attr1": "val1"},
++            {
++                "attr2": "val2",
++                "attr1": "val1"
++            },
++            recipient_id="my-recipient"
++        )
++        assert_xml_equal(
++            """
++<cib validate-with="pacemaker-2.5">
++    <configuration>
++        <alerts>
++            <alert id="alert" path="path">
++                <recipient id="alert-recipient" value="value1"/>
++                <recipient id="my-recipient" value="value">
++                    <meta_attributes
++                        id="my-recipient-meta_attributes"
++                    >
++                        <nvpair
++                            id="my-recipient-meta_attributes-attr1"
++                            name="attr1"
++                            value="val1"
++                        />
++                        <nvpair
++                            id="my-recipient-meta_attributes-attr2"
++                            name="attr2"
++                            value="val2"
++                        />
++                    </meta_attributes>
++                    <instance_attributes
++                        id="my-recipient-instance_attributes"
++                    >
++                        <nvpair
++                            id="my-recipient-instance_attributes-attr1"
++                            name="attr1"
++                            value="val1"
++                        />
++                    </instance_attributes>
++                </recipient>
++            </alert>
++        </alerts>
++    </configuration>
++</cib>
++            """,
++            self.mock_env._get_cib_xml()
++        )
++
+ 
+ class UpdateRecipientTest(TestCase):
+     def setUp(self):
+@@ -470,29 +520,29 @@ class UpdateRecipientTest(TestCase):
+             self.mock_log, self.mock_rep, cib_data=cib
+         )
+ 
+-    def test_alert_not_found(self):
++    def test_empty_value(self):
+         assert_raise_library_error(
+             lambda: cmd_alert.update_recipient(
+-                self.mock_env, "unknown", "recipient", {}, {}
++                self.mock_env, "alert-recipient-1", {}, {}, recipient_value=""
+             ),
+             (
+                 Severities.ERROR,
+-                report_codes.CIB_ALERT_NOT_FOUND,
+-                {"alert": "unknown"}
++                report_codes.CIB_ALERT_RECIPIENT_VALUE_INVALID,
++                {"recipient": ""}
+             )
+         )
+ 
+     def test_recipient_not_found(self):
+         assert_raise_library_error(
+             lambda: cmd_alert.update_recipient(
+-                self.mock_env, "alert", "recipient", {}, {}
++                self.mock_env, "recipient", {}, {}
+             ),
+             (
+                 Severities.ERROR,
+-                report_codes.CIB_ALERT_RECIPIENT_NOT_FOUND,
++                report_codes.ID_NOT_FOUND,
+                 {
+-                    "recipient": "recipient",
+-                    "alert": "alert"
++                    "id": "recipient",
++                    "id_description": "Recipient"
+                 }
+             )
+         )
+@@ -500,14 +550,14 @@ class UpdateRecipientTest(TestCase):
+     def test_update_all(self):
+         cmd_alert.update_recipient(
+             self.mock_env,
+-            "alert",
+-            "value",
++            "alert-recipient-1",
+             {"attr1": "value"},
+             {
+                 "attr1": "",
+                 "attr3": "new_val"
+             },
+-            "desc"
++            recipient_value="new_val",
++            description="desc"
+         )
+         assert_xml_equal(
+             """
+@@ -518,7 +568,7 @@ class UpdateRecipientTest(TestCase):
+                 <recipient id="alert-recipient" value="value1"/>
+                 <recipient
+                     id="alert-recipient-1"
+-                    value="value"
++                    value="new_val"
+                     description="desc"
+                 >
+                     <meta_attributes
+@@ -575,35 +625,20 @@ class RemoveRecipientTest(TestCase):
+             self.mock_log, self.mock_rep, cib_data=cib
+         )
+ 
+-    def test_alert_not_found(self):
+-        assert_raise_library_error(
+-            lambda: cmd_alert.remove_recipient(
+-                self.mock_env, "unknown", "recipient"
+-            ),
+-            (
+-                Severities.ERROR,
+-                report_codes.CIB_ALERT_NOT_FOUND,
+-                {"alert": "unknown"}
+-            )
+-        )
+-
+     def test_recipient_not_found(self):
+         assert_raise_library_error(
+             lambda: cmd_alert.remove_recipient(
+-                self.mock_env, "alert", "recipient"
++                self.mock_env, "recipient"
+             ),
+             (
+                 Severities.ERROR,
+-                report_codes.CIB_ALERT_RECIPIENT_NOT_FOUND,
+-                {
+-                    "recipient": "recipient",
+-                    "alert": "alert"
+-                }
++                report_codes.ID_NOT_FOUND,
++                {"id": "recipient"}
+             )
+         )
+ 
+     def test_success(self):
+-        cmd_alert.remove_recipient(self.mock_env, "alert", "value1")
++        cmd_alert.remove_recipient(self.mock_env, "alert-recipient")
+         assert_xml_equal(
+             """
+             <cib validate-with="pacemaker-2.5">
+diff --git a/pcs/lib/reports.py b/pcs/lib/reports.py
+index 9ececf9..fc2670b 100644
+--- a/pcs/lib/reports.py
++++ b/pcs/lib/reports.py
+@@ -1654,40 +1654,39 @@ def cluster_restart_required_to_apply_changes():
+     )
+ 
+ 
+-def cib_alert_recipient_already_exists(alert_id, recipient_value):
++def cib_alert_recipient_already_exists(
++    alert_id, recipient_value, severity=ReportItemSeverity.ERROR, forceable=None
++):
+     """
+-    Error that recipient already exists.
++    Recipient with specified value already exists in alert with id 'alert_id'
+ 
+     alert_id -- id of alert to which recipient belongs
+     recipient_value -- value of recipient
+     """
+-    return ReportItem.error(
++    return ReportItem(
+         report_codes.CIB_ALERT_RECIPIENT_ALREADY_EXISTS,
+-        "Recipient '{recipient}' in alert '{alert}' already exists.",
++        severity,
++        "Recipient '{recipient}' in alert '{alert}' already exists",
+         info={
+             "recipient": recipient_value,
+             "alert": alert_id
+-        }
++        },
++        forceable=forceable
+     )
+ 
+ 
+-def cib_alert_recipient_not_found(alert_id, recipient_value):
++def cib_alert_recipient_invalid_value(recipient_value):
+     """
+-    Specified recipient not found.
++    Invalid recipient value.
+ 
+-    alert_id -- id of alert to which recipient should belong
+     recipient_value -- recipient value
+     """
+     return ReportItem.error(
+-        report_codes.CIB_ALERT_RECIPIENT_NOT_FOUND,
+-        "Recipient '{recipient}' not found in alert '{alert}'.",
+-        info={
+-            "recipient": recipient_value,
+-            "alert": alert_id
+-        }
++        report_codes.CIB_ALERT_RECIPIENT_VALUE_INVALID,
++        "Recipient value '{recipient}' is not valid.",
++        info={"recipient": recipient_value}
+     )
+ 
+-
+ def cib_alert_not_found(alert_id):
+     """
+     Alert with specified id doesn't exist.
+-- 
+1.8.3.1
+
+
+From b8155a2bfa79bb71429953eb756e393c18926e4c Mon Sep 17 00:00:00 2001
+From: Ondrej Mular <omular@redhat.com>
+Date: Sat, 9 Jul 2016 13:54:00 +0200
+Subject: [PATCH 2/2] cli: use recipient id as identifier instead of its value
+
+---
+ pcs/alert.py           |  32 +++++-----
+ pcs/pcs.8              |   8 +--
+ pcs/test/test_alert.py | 165 ++++++++++++++++++++++++++++++++++++++++---------
+ pcs/usage.py           |  14 +++--
+ 4 files changed, 164 insertions(+), 55 deletions(-)
+
+diff --git a/pcs/alert.py b/pcs/alert.py
+index d3a6e28..4786f57 100644
+--- a/pcs/alert.py
++++ b/pcs/alert.py
+@@ -139,42 +139,44 @@ def recipient_add(lib, argv, modifiers):
+ 
+     sections = parse_cmd_sections(argv[2:], ["options", "meta"])
+     main_args = prepare_options(sections["main"])
+-    ensure_only_allowed_options(main_args, ["description"])
++    ensure_only_allowed_options(main_args, ["description", "id"])
+ 
+     lib.alert.add_recipient(
+         alert_id,
+         recipient_value,
+         prepare_options(sections["options"]),
+         prepare_options(sections["meta"]),
+-        main_args.get("description", None)
++        recipient_id=main_args.get("id", None),
++        description=main_args.get("description", None),
++        allow_same_value=modifiers["force"]
+     )
+ 
+ 
+ def recipient_update(lib, argv, modifiers):
+-    if len(argv) < 2:
++    if len(argv) < 1:
+         raise CmdLineInputError()
+ 
+-    alert_id = argv[0]
+-    recipient_value = argv[1]
++    recipient_id = argv[0]
+ 
+-    sections = parse_cmd_sections(argv[2:], ["options", "meta"])
++    sections = parse_cmd_sections(argv[1:], ["options", "meta"])
+     main_args = prepare_options(sections["main"])
+-    ensure_only_allowed_options(main_args, ["description"])
++    ensure_only_allowed_options(main_args, ["description", "value"])
+ 
+     lib.alert.update_recipient(
+-        alert_id,
+-        recipient_value,
++        recipient_id,
+         prepare_options(sections["options"]),
+         prepare_options(sections["meta"]),
+-        main_args.get("description", None)
++        recipient_value=main_args.get("value", None),
++        description=main_args.get("description", None),
++        allow_same_value=modifiers["force"]
+     )
+ 
+ 
+ def recipient_remove(lib, argv, modifiers):
+-    if len(argv) != 2:
++    if len(argv) != 1:
+         raise CmdLineInputError()
+ 
+-    lib.alert.remove_recipient(argv[0], argv[1])
++    lib.alert.remove_recipient(argv[0])
+ 
+ 
+ def _nvset_to_str(nvset_obj):
+@@ -219,9 +221,9 @@ def _alert_to_str(alert):
+ 
+ 
+ def _recipient_to_str(recipient):
+-    return ["Recipient: {value}".format(value=recipient["value"])] + indent(
+-        __description_attributes_to_str(recipient), 1
+-    )
++    return ["Recipient: {id} (value={value})".format(
++        value=recipient["value"], id=recipient["id"]
++    )] + indent(__description_attributes_to_str(recipient), 1)
+ 
+ 
+ def print_alert_config(lib, argv, modifiers):
+diff --git a/pcs/pcs.8 b/pcs/pcs.8
+index 4426444..223ef1b 100644
+--- a/pcs/pcs.8
++++ b/pcs/pcs.8
+@@ -666,13 +666,13 @@ Update existing alert with specified id.
+ remove <alert\-id>
+ Remove alert with specified id.
+ .TP
+-recipient add <alert\-id> <recipient\-value> [description=<description>] [options [<option>=<value>]...] [meta [<meta\-option>=<value>]...]
++recipient add <alert\-id> <recipient\-value> [id=<recipient\-id>] [description=<description>] [options [<option>=<value>]...] [meta [<meta-option>=<value>]...]
+ Add new recipient to specified alert.
+ .TP
+-recipient update <alert\-id> <recipient\-value> [description=<description>] [options [<option>=<value>]...] [meta [<meta\-option>=<value>]...]
+-Update existing recipient identified by alert and it's value.
++recipient update <recipient\-id> [value=<recipient\-value>] [description=<description>] [options [<option>=<value>]...] [meta [<meta-option>=<value>]...]
++Update existing recipient identified by it's id.
+ .TP
+-recipient remove <alert\-id> <recipient\-value>
++recipient remove <recipient\-id>
+ Remove specified recipient.
+ .SH EXAMPLES
+ .TP
+diff --git a/pcs/test/test_alert.py b/pcs/test/test_alert.py
+index 905dc9f..bb61600 100644
+--- a/pcs/test/test_alert.py
++++ b/pcs/test/test_alert.py
+@@ -246,12 +246,12 @@ Alerts:
+ Alerts:
+  Alert: alert (path=test)
+   Recipients:
+-   Recipient: rec_value
++   Recipient: alert-recipient (value=rec_value)
+ """
+         )
+         self.assert_pcs_success(
+-            "alert recipient add alert rec_value2 description=description "
+-            "options o1=1 o2=2 meta m1=v1 m2=v2"
++            "alert recipient add alert rec_value2 id=my-recipient "
++            "description=description options o1=1 o2=2 meta m1=v1 m2=v2"
+         )
+         self.assert_pcs_success(
+             "alert config",
+@@ -259,26 +259,56 @@ Alerts:
+ Alerts:
+  Alert: alert (path=test)
+   Recipients:
+-   Recipient: rec_value
+-   Recipient: rec_value2
++   Recipient: alert-recipient (value=rec_value)
++   Recipient: my-recipient (value=rec_value2)
+     Description: description
+     Options: o1=1 o2=2
+     Meta options: m1=v1 m2=v2
+ """
+         )
+ 
+-    def test_no_alert(self):
++    def test_already_exists(self):
++        self.assert_pcs_success("alert create path=test")
++        self.assert_pcs_success("alert recipient add alert rec_value id=rec")
+         self.assert_pcs_fail(
+-            "alert recipient add alert rec_value",
+-            "Error: Alert 'alert' not found.\n"
++            "alert recipient add alert value id=rec",
++            "Error: 'rec' already exists\n"
++        )
++        self.assert_pcs_fail(
++            "alert recipient add alert value id=alert",
++            "Error: 'alert' already exists\n"
+         )
+ 
+-    def test_already_exists(self):
++    def test_same_value(self):
+         self.assert_pcs_success("alert create path=test")
+-        self.assert_pcs_success("alert recipient add alert rec_value")
++        self.assert_pcs_success("alert recipient add alert rec_value id=rec")
+         self.assert_pcs_fail(
+             "alert recipient add alert rec_value",
+-            "Error: Recipient 'rec_value' in alert 'alert' already exists.\n"
++            "Error: Recipient 'rec_value' in alert 'alert' already exists, "
++            "use --force to override\n"
++        )
++        self.assert_pcs_success(
++            "alert config",
++            """\
++Alerts:
++ Alert: alert (path=test)
++  Recipients:
++   Recipient: rec (value=rec_value)
++"""
++        )
++        self.assert_pcs_success(
++            "alert recipient add alert rec_value --force",
++            "Warning: Recipient 'rec_value' in alert 'alert' already exists\n"
++        )
++        self.assert_pcs_success(
++            "alert config",
++            """\
++Alerts:
++ Alert: alert (path=test)
++  Recipients:
++   Recipient: rec (value=rec_value)
++   Recipient: alert-recipient (value=rec_value)
++"""
+         )
+ 
+ 
+@@ -296,14 +326,14 @@ class UpdateRecipientAlert(PcsAlertTest):
+ Alerts:
+  Alert: alert (path=test)
+   Recipients:
+-   Recipient: rec_value
++   Recipient: alert-recipient (value=rec_value)
+     Description: description
+     Options: o1=1 o2=2
+     Meta options: m1=v1 m2=v2
+ """
+         )
+         self.assert_pcs_success(
+-            "alert recipient update alert rec_value description=desc "
++            "alert recipient update alert-recipient value=new description=desc "
+             "options o1= o2=v2 o3=3 meta m1= m2=2 m3=3"
+         )
+         self.assert_pcs_success(
+@@ -312,24 +342,99 @@ Alerts:
+ Alerts:
+  Alert: alert (path=test)
+   Recipients:
+-   Recipient: rec_value
++   Recipient: alert-recipient (value=new)
++    Description: desc
++    Options: o2=v2 o3=3
++    Meta options: m2=2 m3=3
++"""
++        )
++        self.assert_pcs_success(
++            "alert recipient update alert-recipient value=new"
++        )
++        self.assert_pcs_success(
++            "alert config",
++            """\
++Alerts:
++ Alert: alert (path=test)
++  Recipients:
++   Recipient: alert-recipient (value=new)
+     Description: desc
+     Options: o2=v2 o3=3
+     Meta options: m2=2 m3=3
+ """
+         )
+ 
+-    def test_no_alert(self):
++    def test_value_exists(self):
++        self.assert_pcs_success("alert create path=test")
++        self.assert_pcs_success("alert recipient add alert rec_value")
++        self.assert_pcs_success("alert recipient add alert value")
++        self.assert_pcs_success(
++            "alert config",
++            """\
++Alerts:
++ Alert: alert (path=test)
++  Recipients:
++   Recipient: alert-recipient (value=rec_value)
++   Recipient: alert-recipient-1 (value=value)
++"""
++        )
+         self.assert_pcs_fail(
+-            "alert recipient update alert rec_value description=desc",
+-            "Error: Alert 'alert' not found.\n"
++            "alert recipient update alert-recipient value=value",
++            "Error: Recipient 'value' in alert 'alert' already exists, "
++            "use --force to override\n"
++        )
++        self.assert_pcs_success(
++            "alert recipient update alert-recipient value=value --force",
++            "Warning: Recipient 'value' in alert 'alert' already exists\n"
++        )
++        self.assert_pcs_success(
++            "alert config",
++            """\
++Alerts:
++ Alert: alert (path=test)
++  Recipients:
++   Recipient: alert-recipient (value=value)
++   Recipient: alert-recipient-1 (value=value)
++"""
++        )
++
++    def test_value_same_as_previous(self):
++        self.assert_pcs_success("alert create path=test")
++        self.assert_pcs_success("alert recipient add alert rec_value")
++        self.assert_pcs_success(
++            "alert config",
++            """\
++Alerts:
++ Alert: alert (path=test)
++  Recipients:
++   Recipient: alert-recipient (value=rec_value)
++"""
++        )
++        self.assert_pcs_success(
++            "alert recipient update alert-recipient value=rec_value"
++        )
++        self.assert_pcs_success(
++            "alert config",
++            """\
++Alerts:
++ Alert: alert (path=test)
++  Recipients:
++   Recipient: alert-recipient (value=rec_value)
++"""
+         )
+ 
+     def test_no_recipient(self):
++        self.assert_pcs_fail(
++            "alert recipient update rec description=desc",
++            "Error: Recipient 'rec' does not exist\n"
++        )
++
++    def test_empty_value(self):
+         self.assert_pcs_success("alert create path=test")
++        self.assert_pcs_success("alert recipient add alert rec_value id=rec")
+         self.assert_pcs_fail(
+-            "alert recipient update alert rec_value description=desc",
+-            "Error: Recipient 'rec_value' not found in alert 'alert'.\n"
++            "alert recipient update rec value=",
++            "Error: Recipient value '' is not valid.\n"
+         )
+ 
+ 
+@@ -337,27 +442,27 @@ Alerts:
+ class RemoveRecipientTest(PcsAlertTest):
+     def test_success(self):
+         self.assert_pcs_success("alert create path=test")
+-        self.assert_pcs_success("alert recipient add alert rec_value")
++        self.assert_pcs_success("alert recipient add alert rec_value id=rec")
+         self.assert_pcs_success(
+             "alert config",
+             """\
+ Alerts:
+  Alert: alert (path=test)
+   Recipients:
+-   Recipient: rec_value
++   Recipient: rec (value=rec_value)
+ """
+         )
+-        self.assert_pcs_success("alert recipient remove alert rec_value")
+-
+-    def test_no_alert(self):
+-        self.assert_pcs_fail(
+-            "alert recipient remove alert rec_value",
+-            "Error: Alert 'alert' not found.\n"
++        self.assert_pcs_success("alert recipient remove rec")
++        self.assert_pcs_success(
++            "alert config",
++            """\
++Alerts:
++ Alert: alert (path=test)
++"""
+         )
+ 
+     def test_no_recipient(self):
+-        self.assert_pcs_success("alert create path=test")
+         self.assert_pcs_fail(
+-            "alert recipient remove alert rec_value",
+-            "Error: Recipient 'rec_value' not found in alert 'alert'.\n"
++            "alert recipient remove rec",
++            "Error: Recipient 'rec' does not exist\n"
+         )
+diff --git a/pcs/usage.py b/pcs/usage.py
+index ee53a2f..77b496e 100644
+--- a/pcs/usage.py
++++ b/pcs/usage.py
+@@ -1402,15 +1402,17 @@ Commands:
+     remove <alert-id>
+         Remove alert with specified id.
+ 
+-    recipient add <alert-id> <recipient-value> [description=<description>]
+-            [options [<option>=<value>]...] [meta [<meta-option>=<value>]...]
++    recipient add <alert-id> <recipient-value> [id=<recipient-id>]
++            [description=<description>] [options [<option>=<value>]...]
++            [meta [<meta-option>=<value>]...]
+         Add new recipient to specified alert.
+ 
+-    recipient update <alert-id> <recipient-value> [description=<description>]
+-            [options [<option>=<value>]...] [meta [<meta-option>=<value>]...]
+-        Update existing recipient identified by alert and it's value.
++    recipient update <recipient-id> [value=<recipient-value>]
++            [description=<description>] [options [<option>=<value>]...]
++            [meta [<meta-option>=<value>]...]
++        Update existing recipient identified by it's id.
+ 
+-    recipient remove <alert-id> <recipient-value>
++    recipient remove <recipient-id>
+         Remove specified recipient.
+ """
+     if pout:
+-- 
+1.8.3.1
+

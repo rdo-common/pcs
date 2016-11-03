@@ -1,0 +1,84 @@
+From 4fbf6a24492b0ac61be7822208275f1837165ae2 Mon Sep 17 00:00:00 2001
+From: Ondrej Mular <omular@redhat.com>
+Date: Fri, 22 Jul 2016 13:37:28 +0200
+Subject: [PATCH] web UI: fix occasional issue with not showing optional
+ arguments of resources
+
+---
+ pcsd/public/js/nodes-ember.js | 12 ++++--------
+ pcsd/public/js/pcsd.js        | 17 +++++++----------
+ 2 files changed, 11 insertions(+), 18 deletions(-)
+
+diff --git a/pcsd/public/js/nodes-ember.js b/pcsd/public/js/nodes-ember.js
+index cb62806..2b43559 100644
+--- a/pcsd/public/js/nodes-ember.js
++++ b/pcsd/public/js/nodes-ember.js
+@@ -210,20 +210,16 @@ Pcs = Ember.Application.createWithMixins({
+           Ember.run.scheduleOnce('afterRender', Pcs, function () {
+             if (self.get('cur_fence')) {
+               if (fence_change) {
+-                if (first_run) {
+-                  update_instance_attributes(self.get('cur_fence').get('id'));
+-                }
+-                tree_view_onclick(self.get('cur_fence').get('id'), true);
++                tree_view_onclick(self.get('cur_fence').get('id'), first_run);
+               } else {
+                 tree_view_select(self.get('cur_fence').get('id'));
+               }
+             }
+             if (self.get('cur_resource')) {
+               if (resource_change) {
+-                if (first_run) {
+-                  update_instance_attributes(self.get('cur_resource').get('id'));
+-                }
+-                tree_view_onclick(self.get('cur_resource').get('id'), true);
++                tree_view_onclick(
++                  self.get('cur_resource').get('id'), first_run
++                );
+               } else {
+                 tree_view_select(self.get('cur_resource').get('id'));
+               }
+diff --git a/pcsd/public/js/pcsd.js b/pcsd/public/js/pcsd.js
+index e763482..1ec0f1c 100644
+--- a/pcsd/public/js/pcsd.js
++++ b/pcsd/public/js/pcsd.js
+@@ -2108,29 +2108,26 @@ function update_instance_attributes(resource_id) {
+   }, res_obj.get("stonith"));
+ }
+ 
+-function tree_view_onclick(resource_id, auto) {
+-  auto = typeof auto !== 'undefined' ? auto : false;
++function tree_view_onclick(resource_id, first_run) {
++  first_run = typeof first_run !== 'undefined' ? first_run : false;
+   var resource_obj = Pcs.resourcesContainer.get_resource_by_id(resource_id);
+   if (!resource_obj) {
+     console.log("Resource " + resource_id + "not found.");
+     return;
+   }
+   if (resource_obj.get('stonith')) {
+-    Pcs.resourcesContainer.set('cur_fence', resource_obj);
+-    if (!auto) {
++    if (!first_run) {
+       window.location.hash = "/fencedevices/" + resource_id;
+-      update_instance_attributes(resource_id);
+     }
++    Pcs.resourcesContainer.set('cur_fence', resource_obj);
+   } else {
+-    Pcs.resourcesContainer.set('cur_resource', resource_obj);
+-
+-    if (!auto) {
++    if (!first_run) {
+       window.location.hash = "/resources/" + resource_id;
+-      update_instance_attributes(resource_id);
+     }
++    Pcs.resourcesContainer.set('cur_resource', resource_obj);
+     auto_show_hide_constraints();
+   }
+-
++  update_instance_attributes(resource_id);
+   tree_view_select(resource_id);
+ }
+ 
+-- 
+1.8.3.1
+

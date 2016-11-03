@@ -1,0 +1,102 @@
+From d1a31c8b887fc668eff8ef582124a84524a5b760 Mon Sep 17 00:00:00 2001
+From: Ondrej Mular <omular@redhat.com>
+Date: Mon, 22 Aug 2016 15:52:08 +0200
+Subject: [PATCH] fix error message in node maintenance/unmaintenance commands
+
+---
+ pcs/node.py           | 23 ++++++++++++++---------
+ pcs/test/test_node.py | 10 ++++++++--
+ 2 files changed, 22 insertions(+), 11 deletions(-)
+
+diff --git a/pcs/node.py b/pcs/node.py
+index be2fb13..ed77d5d 100644
+--- a/pcs/node.py
++++ b/pcs/node.py
+@@ -77,8 +77,8 @@ def node_maintenance(argv, on=True):
+         for node in argv:
+             if node not in cluster_nodes:
+                 utils.err(
+-                    "Node '%s' does not appear to exist in configuration" %
+-                    argv[0],
++                    "Node '{0}' does not appear to exist in "
++                    "configuration".format(node),
+                     False
+                 )
+                 failed_count += 1
+@@ -87,25 +87,30 @@ def node_maintenance(argv, on=True):
+     else:
+         nodes.append("")
+ 
++    if failed_count > 0:
++        sys.exit(1)
++
+     for node in nodes:
+-        node = ["-N", node] if node else []
++        node_attr = ["-N", node] if node else []
+         output, retval = utils.run(
+             ["crm_attribute", "-t", "nodes", "-n", "maintenance"] + action +
+-            node
++            node_attr
+         )
+         if retval != 0:
+-            node_name = ("node '%s'" % node) if argv else "current node"
++            node_name = ("node '{0}'".format(node)) if argv else "current node"
+             failed_count += 1
+             if on:
+                 utils.err(
+-                    "Unable to put %s to maintenance mode.\n%s" %
+-                    (node_name, output),
++                    "Unable to put {0} to maintenance mode: {1}".format(
++                        node_name, output
++                    ),
+                     False
+                 )
+             else:
+                 utils.err(
+-                    "Unable to remove %s from maintenance mode.\n%s" %
+-                    (node_name, output),
++                    "Unable to remove {0} from maintenance mode: {1}".format(
++                        node_name, output
++                    ),
+                     False
+                 )
+     if failed_count > 0:
+diff --git a/pcs/test/test_node.py b/pcs/test/test_node.py
+index 6f03112..785c711 100644
+--- a/pcs/test/test_node.py
++++ b/pcs/test/test_node.py
+@@ -88,11 +88,14 @@ Node Attributes:
+ """
+         ac(expected_out, output)
+ 
+-        output, returnVal = pcs(temp_cib, "node maintenance nonexistant-node")
++        output, returnVal = pcs(
++            temp_cib, "node maintenance nonexistant-node and-another"
++        )
+         self.assertEqual(returnVal, 1)
+         self.assertEqual(
+             output,
+             "Error: Node 'nonexistant-node' does not appear to exist in configuration\n"
++            "Error: Node 'and-another' does not appear to exist in configuration\n"
+         )
+         output, _ = pcs(temp_cib, "property")
+         expected_out = """\
+@@ -134,11 +137,14 @@ Cluster Properties:
+ """
+         ac(expected_out, output)
+ 
+-        output, returnVal = pcs(temp_cib, "node unmaintenance nonexistant-node")
++        output, returnVal = pcs(
++            temp_cib, "node unmaintenance nonexistant-node and-another"
++        )
+         self.assertEqual(returnVal, 1)
+         self.assertEqual(
+             output,
+             "Error: Node 'nonexistant-node' does not appear to exist in configuration\n"
++            "Error: Node 'and-another' does not appear to exist in configuration\n"
+         )
+         output, _ = pcs(temp_cib, "property")
+         expected_out = """\
+-- 
+1.8.3.1
+

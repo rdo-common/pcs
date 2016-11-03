@@ -1,0 +1,315 @@
+From 4949b387cbec0b79976ca87fbde41e441c21c197 Mon Sep 17 00:00:00 2001
+From: Ondrej Mular <omular@redhat.com>
+Date: Mon, 27 Jun 2016 11:49:43 +0200
+Subject: [PATCH] bz1346852-01-fix bad request when resource removal takes
+ longer than pcs expects
+
+---
+ pcs/cluster.py          | 19 +++++++++++--
+ pcs/pcs.8               |  4 +--
+ pcs/resource.py         |  3 ++-
+ pcs/settings_default.py |  1 +
+ pcs/usage.py            |  5 ++--
+ pcsd/remote.rb          | 71 ++++++++++++++++++++++++++++++++++++++++++-------
+ pcsd/views/main.erb     | 13 ++++++---
+ pcsd/views/nodes.erb    | 14 +++++-----
+ 8 files changed, 102 insertions(+), 28 deletions(-)
+
+diff --git a/pcs/cluster.py b/pcs/cluster.py
+index 988ab75..9d4798c 100644
+--- a/pcs/cluster.py
++++ b/pcs/cluster.py
+@@ -1171,6 +1171,9 @@ def cluster_push(argv):
+ 
+     filename = None
+     scope = None
++    timeout = None
++    if "--wait" in utils.pcs_options:
++        timeout = utils.validate_wait_get_timeout()
+     for arg in argv:
+         if "=" not in arg:
+             filename = arg
+@@ -1206,8 +1209,20 @@ def cluster_push(argv):
+     output, retval = utils.run(command)
+     if retval != 0:
+         utils.err("unable to push cib\n" + output)
+-    else:
+-        print("CIB updated")
++    print("CIB updated")
++    if "--wait" not in utils.pcs_options:
++        return
++    cmd = ["crm_resource", "--wait"]
++    if timeout:
++        cmd.extend(["--timeout", timeout])
++    output, retval = utils.run(cmd)
++    if retval != 0:
++        msg = []
++        if retval == settings.pacemaker_wait_timeout_status:
++            msg.append("waiting timeout")
++        if output:
++            msg.append("\n" + output)
++        utils.err("\n".join(msg).strip())
+ 
+ def cluster_edit(argv):
+     if 'EDITOR' in os.environ:
+diff --git a/pcs/pcs.8 b/pcs/pcs.8
+index a72a9bd..949d918 100644
+--- a/pcs/pcs.8
++++ b/pcs/pcs.8
+@@ -259,8 +259,8 @@ Sync corosync configuration to all nodes found from current corosync.conf file (
+ cib [filename] [scope=<scope> | \fB\-\-config\fR]
+ Get the raw xml from the CIB (Cluster Information Base).  If a filename is provided, we save the CIB to that file, otherwise the CIB is printed.  Specify scope to get a specific section of the CIB.  Valid values of the scope are: configuration, nodes, resources, constraints, crm_config, rsc_defaults, op_defaults, status.  \fB\-\-config\fR is the same as scope=configuration.  Do not specify a scope if you want to edit the saved CIB using pcs (pcs -f <command>).
+ .TP
+-cib-push <filename> [scope=<scope> | \fB\-\-config\fR]
+-Push the raw xml from <filename> to the CIB (Cluster Information Base).  You can obtain the CIB by running the 'pcs cluster cib' command, which is recommended first step when you want to perform desired modifications (pcs \fB\-f\fR <command>) for the one-off push.  Specify scope to push a specific section of the CIB.  Valid values of the scope are: configuration, nodes, resources, constraints, crm_config, rsc_defaults, op_defaults.  \fB\-\-config\fR is the same as scope=configuration.  Use of \fB\-\-config\fR is recommended.  Do not specify a scope if you need to push the whole CIB or be warned in the case of outdated CIB.  WARNING: the selected scope of the CIB will be overwritten by the current content of the specified file.
++cib-push <filename> [scope=<scope> | \fB\-\-config\fR] [\fB\-\-wait\fR[=<n>]]
++Push the raw xml from <filename> to the CIB (Cluster Information Base).  You can obtain the CIB by running the 'pcs cluster cib' command, which is recommended first step when you want to perform desired modifications (pcs \fB\-f\fR <command>) for the one-off push.  Specify scope to push a specific section of the CIB.  Valid values of the scope are: configuration, nodes, resources, constraints, crm_config, rsc_defaults, op_defaults.  \fB\-\-config\fR is the same as scope=configuration.  Use of \fB\-\-config\fR is recommended.  Do not specify a scope if you need to push the whole CIB or be warned in the case of outdated CIB.  If --wait is specified wait up to 'n' seconds for changes to be applied.  WARNING: the selected scope of the CIB will be overwritten by the current content of the specified file.
+ .TP
+ cib\-upgrade
+ Upgrade the CIB to conform to the latest version of the document schema.
+diff --git a/pcs/resource.py b/pcs/resource.py
+index 284bdb2..9384a21 100644
+--- a/pcs/resource.py
++++ b/pcs/resource.py
+@@ -21,6 +21,8 @@ from pcs import (
+     constraint,
+     settings,
+ )
++from pcs.settings import pacemaker_wait_timeout_status as \
++    PACEMAKER_WAIT_TIMEOUT_STATUS
+ import pcs.lib.cib.acl as lib_acl
+ import pcs.lib.pacemaker as lib_pacemaker
+ from pcs.lib.external import get_systemd_services
+@@ -31,7 +33,6 @@ from pcs.lib.pacemaker_values import timeout_to_seconds
+ import pcs.lib.resource_agent as lib_ra
+ 
+ 
+-PACEMAKER_WAIT_TIMEOUT_STATUS = 62
+ RESOURCE_RELOCATE_CONSTRAINT_PREFIX = "pcs-relocate-"
+ 
+ def resource_cmd(argv):
+diff --git a/pcs/settings_default.py b/pcs/settings_default.py
+index 9d44918..15421fd 100644
+--- a/pcs/settings_default.py
++++ b/pcs/settings_default.py
+@@ -40,3 +40,4 @@ ocf_resources = os.path.join(ocf_root, "resource.d/")
+ nagios_metadata_path = "/usr/share/pacemaker/nagios/plugins-metadata/"
+ sbd_watchdog_default = "/dev/watchdog"
+ sbd_config = "/etc/sysconfig/sbd"
++pacemaker_wait_timeout_status = 62
+diff --git a/pcs/usage.py b/pcs/usage.py
+index 42e03e6..542f806 100644
+--- a/pcs/usage.py
++++ b/pcs/usage.py
+@@ -653,7 +653,7 @@ Commands:
+         scope=configuration.  Do not specify a scope if you want to edit
+         the saved CIB using pcs (pcs -f <command>).
+ 
+-    cib-push <filename> [scope=<scope> | --config]
++    cib-push <filename> [scope=<scope> | --config] [--wait[=<n>]]
+         Push the raw xml from <filename> to the CIB (Cluster Information Base).
+         You can obtain the CIB by running the 'pcs cluster cib' command, which
+         is recommended first step when you want to perform desired
+@@ -663,7 +663,8 @@ Commands:
+         crm_config, rsc_defaults, op_defaults.  --config is the same as
+         scope=configuration.  Use of --config is recommended.  Do not specify
+         a scope if you need to push the whole CIB or be warned in the case
+-        of outdated CIB.
++        of outdated CIB. If --wait is specified wait up to 'n' seconds for
++        changes to be applied.
+         WARNING: the selected scope of the CIB will be overwritten by the
+         current content of the specified file.
+ 
+diff --git a/pcsd/remote.rb b/pcsd/remote.rb
+index 0b2dc61..b1e00fa 100644
+--- a/pcsd/remote.rb
++++ b/pcsd/remote.rb
+@@ -5,6 +5,7 @@ require 'set'
+ require 'timeout'
+ require 'rexml/document'
+ require 'base64'
++require 'tempfile'
+ 
+ require 'pcs.rb'
+ require 'resource.rb'
+@@ -1523,23 +1524,73 @@ def remove_resource(params, request, auth_user)
+     return 403, 'Permission denied'
+   end
+   force = params['force']
++  user = PCSAuth.getSuperuserAuth()
+   no_error_if_not_exists = params.include?('no_error_if_not_exists')
+-  errors = ""
+-  params.each { |k,v|
+-    if k.index("resid-") == 0
+-      resid = k.gsub('resid-', '')
+-      command = [PCS, 'resource', 'delete', resid]
+-      command << '--force' if force
+-      out, errout, retval = run_cmd(auth_user, *command)
++  resource_list = []
++  errors = ''
++  resource_to_remove = []
++  params.each { |param,_|
++    if param.start_with?('resid-')
++      resource_list << param.split('resid-', 2)[1]
++    end
++  }
++  tmp_file = nil
++  if force
++    resource_to_remove = resource_list
++  else
++    begin
++      tmp_file = Tempfile.new('temp_cib')
++      _, err, retval = run_cmd(user, PCS, 'cluster', 'cib', tmp_file.path)
+       if retval != 0
+-        unless out.index(" does not exist.") != -1 and no_error_if_not_exists
+-          errors += errout.join(' ').strip + "\n"
++        return [400, 'Unable to stop resource(s).']
++      end
++      cmd = [PCS, '-f', tmp_file.path, 'resource', 'disable']
++      resource_list.each { |resource|
++        _, err, retval = run_cmd(user, *cmd, resource)
++        if retval != 0
++          unless (
++            err.join('').index('unable to find a resource') != -1 and
++            no_error_if_not_exists
++          )
++            errors += "Unable to stop resource '#{resource}': #{err.join('')}"
++          end
++        else
++          resource_to_remove << resource
+         end
++      }
++      _, _, retval = run_cmd(
++        user, PCS, 'cluster', 'cib-push', tmp_file.path, '--config', '--wait'
++      )
++      if retval != 0
++        return [400, 'Unable to stop resource(s).']
++      end
++      errors.strip!
++      unless errors.empty?
++        $logger.info("Stopping resource(s) errors:\n#{errors}")
++        return [400, errors]
++      end
++    rescue IOError
++      return [400, 'Unable to stop resource(s).']
++    ensure
++      if tmp_file
++        tmp_file.close!
++      end
++    end
++  end
++  resource_to_remove.each { |resource|
++    cmd = [PCS, 'resource', 'delete', resource]
++    if force
++      cmd << '--force'
++    end
++    out, err, retval = run_cmd(auth_user, *cmd)
++    if retval != 0
++      unless out.index(' does not exist.') != -1 and no_error_if_not_exists
++        errors += err.join(' ').strip + "\n"
+       end
+     end
+   }
+   errors.strip!
+-  if errors == ""
++  if errors.empty?
+     return 200
+   else
+     $logger.info("Remove resource errors:\n"+errors)
+diff --git a/pcsd/views/main.erb b/pcsd/views/main.erb
+index b14c327..5461515 100644
+--- a/pcsd/views/main.erb
++++ b/pcsd/views/main.erb
+@@ -298,14 +298,19 @@
+         {{meta_attributes-table resource=resource}}
+         {{#if utilization_support}}
+           {{#if resource.is_primitive}}
+-            {{utilization-table entity=resource utilization=resource.utilization type="resource"}}
++            {{utilization-table
++                entity=resource
++                utilization=resource.utilization
++                type="resource"
++                table_id="resource_utilization_attributes"
++            }}
+           {{/if}}
+         {{/if}}
+         <br style="clear:left;">
+       {{/unless}}
+     </div>
+     {{#if stonith}}
+-      <div style="clear:left; margin-top: 2em;" id="stonith_info_div">
++      <div style="clear:left; margin-top: 2em;" id="stonith_agent_form">
+         {{fence-form
+             resource=resource
+             agent=resource.resource_agent
+@@ -314,7 +319,7 @@
+       </div>
+     {{else}}
+     {{#if resource.is_primitive}}
+-      <div style="clear:left; margin-top: 2em;" id="resource_info_div">
++      <div style="clear:left; margin-top: 2em;" id="resource_agent_form">
+         {{resource-form
+             resource=resource
+             agent=resource.resource_agent
+@@ -725,7 +730,7 @@ Use the 'Add' button to submit the form.">
+       <tr>
+         <td
+             {{action toggleBody}}
+-            id="utilization_attributes"
++            {{bind-attr id=table_id}}
+             class="datatable_header hover-pointer"
+         >
+           {{#if show_content}}
+diff --git a/pcsd/views/nodes.erb b/pcsd/views/nodes.erb
+index 478e0f6..8fccd25 100644
+--- a/pcsd/views/nodes.erb
++++ b/pcsd/views/nodes.erb
+@@ -247,9 +247,8 @@
+               </tr>
+             </table>
+             <table style="clear:left;float:left;margin-top:25px;">
+-              <tr><td onclick="show_hide_constraints(this)" class="datatable_header hover-pointer">Node Attributes ({{#if Pcs.nodesController.cur_node_attr.length}}{{Pcs.nodesController.cur_node_attr.length}}{{else}}0{{/if}})<span style="" class="downarrow sprites"></span><span style="display: none;" class="rightarrow sprites"></span></td></tr>
++              <tr><td onclick="show_hide_constraints(this)" class="datatable_header hover-pointer">Node Attributes ({{#if Pcs.nodesController.cur_node_attr.length}}{{Pcs.nodesController.cur_node_attr.length}}{{else}}0{{/if}})<span style="" class="downarrow sprites" id="node_attributes"></span><span style="display: none;" class="rightarrow sprites"></span></td></tr>
+               <tr><td>
+-                <div id="node_attributes">
+                   <table class="datatable">
+                     <tr><th>Attribute</th><th>Value</th><th>Remove</th></tr>
+                     {{#each attr in Pcs.nodesController.cur_node_attr}}
+@@ -268,14 +267,12 @@
+                       <td><button type="button" onclick="add_node_attr('#new_node_attr_col');" name="add">Add</button></td>
+                     </tr>
+                   </table>
+-                </div>
+               </td>
+               </tr>
+             </table>
+             <table style="clear:left;float:left;margin-top:25px;">
+-              <tr><td onclick="show_hide_constraints(this)" class="datatable_header hover-pointer">Fence Levels ({{#if Pcs.nodesController.cur_node_fence_levels.length}}{{Pcs.nodesController.cur_node_fence_levels.length}}{{else}}0{{/if}})<span style="" class="downarrow sprites"></span><span style="display: none;" class="rightarrow sprites"></span></td></tr>
++              <tr><td onclick="show_hide_constraints(this)" class="datatable_header hover-pointer">Fence Levels ({{#if Pcs.nodesController.cur_node_fence_levels.length}}{{Pcs.nodesController.cur_node_fence_levels.length}}{{else}}0{{/if}})<span style="" class="downarrow sprites" id="fence_levels"></span><span style="display: none;" class="rightarrow sprites"></span></td></tr>
+               <tr><td>
+-                <div id="fencelevels">
+                   <table class="datatable">
+                     <tr><th>Level</th><th>Fence Devices</th><th>Remove</th></tr>
+                     {{#each Pcs.nodesController.cur_node_fence_levels}}
+@@ -301,13 +298,16 @@
+                       <td><button type="button" onclick="add_remove_fence_level($(this).parent());" name="add">Add</button></td>
+                     </tr>
+                   </table>
+-                </div>
+               </td>
+               </tr>
+             </table>
+             {{#if Pcs.nodesController.utilization_support}}
+             <table style="clear:left; float:left; margin-top: 25px;"><tr><td>
+-            {{utilization-table entity=Pcs.nodesController.cur_node utilization=Pcs.nodesController.cur_node.utilization}}
++            {{utilization-table
++                entity=Pcs.nodesController.cur_node
++                utilization=Pcs.nodesController.cur_node.utilization
++                table_id="node_utilization_attributes"
++            }}
+             </td></tr></table>
+             {{/if}}
+     </div>
+-- 
+1.8.3.1
+

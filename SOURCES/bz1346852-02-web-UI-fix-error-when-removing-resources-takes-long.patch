@@ -1,0 +1,54 @@
+From 06cef95211b84150fece67970426267849e74a36 Mon Sep 17 00:00:00 2001
+From: Ondrej Mular <omular@redhat.com>
+Date: Fri, 22 Jul 2016 08:34:21 +0200
+Subject: [PATCH] web UI: fix error when removing resources takes long
+
+---
+ pcsd/public/js/pcsd.js | 24 +++++++++++++++++-------
+ 1 file changed, 17 insertions(+), 7 deletions(-)
+
+diff --git a/pcsd/public/js/pcsd.js b/pcsd/public/js/pcsd.js
+index 6c88888..e763482 100644
+--- a/pcsd/public/js/pcsd.js
++++ b/pcsd/public/js/pcsd.js
+@@ -1262,7 +1262,9 @@ function remove_nodes(ids, force) {
+ }
+ 
+ function remove_resource(ids, force) {
+-  var data = {};
++  var data = {
++    no_error_if_not_exists: true
++  };
+   if (force) {
+     data["force"] = force;
+   }
+@@ -1287,12 +1289,20 @@ function remove_resource(ids, force) {
+       Pcs.update();
+     },
+     error: function (xhr, status, error) {
+-      error = $.trim(error)
+-      var message = "Unable to remove resources (" + error + ")";
+-      if (
+-        (xhr.responseText.substring(0,6) == "Error:") || ("Forbidden" == error)
+-      ) {
+-        message += "\n\n" + xhr.responseText.replace("--force", "'Enforce removal'");
++      error = $.trim(error);
++      var message = "";
++      if (status == "timeout" || error == "timeout") {
++        message = "Operation takes longer to complete than expected.";
++      } else {
++        message = "Unable to remove resources (" + error + ")";
++        if (
++          (xhr.responseText.substring(0, 6) == "Error:") ||
++          ("Forbidden" == error)
++        ) {
++          message += "\n\n" + xhr.responseText.replace(
++            "--force", "'Enforce removal'"
++          );
++        }
+       }
+       alert(message);
+       $("#dialog_verify_remove_resources.ui-dialog-content").each(
+-- 
+1.8.3.1
+

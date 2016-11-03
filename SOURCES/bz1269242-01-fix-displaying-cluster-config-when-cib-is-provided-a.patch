@@ -1,0 +1,87 @@
+From 8696f5e4f072ac88a3e20b1b376ea8de823f7aa7 Mon Sep 17 00:00:00 2001
+From: Tomas Jelinek <tojeline@redhat.com>
+Date: Fri, 8 Jul 2016 12:20:59 +0200
+Subject: [PATCH] fix displaying cluster config when cib is provided as a file
+
+---
+ pcs/config.py | 11 +++++++++--
+ pcs/status.py |  8 +++++++-
+ pcs/utils.py  | 13 +++++++------
+ 3 files changed, 23 insertions(+), 9 deletions(-)
+
+diff --git a/pcs/config.py b/pcs/config.py
+index 4659c5b..3d86b39 100644
+--- a/pcs/config.py
++++ b/pcs/config.py
+@@ -94,7 +94,14 @@ def config_show(argv):
+     status.nodes_status(["config"])
+     print()
+     config_show_cib()
+-    cluster.cluster_uidgid([], True)
++    if (
++        utils.is_rhel6()
++        or
++        (not utils.usefile and "--corosync_conf" not in utils.pcs_options)
++    ):
++        # with corosync 1 and cman, uid gid is part of cluster.conf file
++        # with corosync 2, uid gid is in a separate directory
++        cluster.cluster_uidgid([], True)
+     if "--corosync_conf" in utils.pcs_options or not utils.is_rhel6():
+         print()
+         print("Quorum:")
+@@ -113,8 +120,8 @@ def config_show_cib():
+     print("Stonith Devices:")
+     resource.resource_show([], True)
+     print("Fencing Levels:")
+-    print()
+     stonith.stonith_level_show()
++    print()
+ 
+     lib = utils.get_library_wrapper()
+     constraint.location_show([])
+diff --git a/pcs/status.py b/pcs/status.py
+index 0e5e0e7..e1f367f 100644
+--- a/pcs/status.py
++++ b/pcs/status.py
+@@ -66,7 +66,13 @@ def full_status():
+     if utils.stonithCheck():
+         print("WARNING: no stonith devices and stonith-enabled is not false")
+ 
+-    if not utils.is_rhel6() and utils.corosyncPacemakerNodeCheck():
++    if (
++        not utils.usefile
++        and
++        not utils.is_rhel6()
++        and
++        utils.corosyncPacemakerNodeCheck()
++    ):
+         print("WARNING: corosync and pacemaker node names do not match (IPs used in setup?)")
+ 
+     print(output)
+diff --git a/pcs/utils.py b/pcs/utils.py
+index 171fbdd..01db081 100644
+--- a/pcs/utils.py
++++ b/pcs/utils.py
+@@ -1808,12 +1808,13 @@ def stonithCheck():
+         if p.attrib["class"] == "stonith":
+             return False
+ 
+-    # check if SBD daemon is running
+-    try:
+-        if is_service_running(cmd_runner(), "sbd"):
+-            return False
+-    except LibraryError:
+-        pass
++    if not usefile:
++        # check if SBD daemon is running
++        try:
++            if is_service_running(cmd_runner(), "sbd"):
++                return False
++        except LibraryError:
++            pass
+ 
+     return True
+ 
+-- 
+1.8.3.1
+

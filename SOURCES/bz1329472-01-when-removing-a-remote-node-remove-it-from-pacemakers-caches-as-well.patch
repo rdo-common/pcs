@@ -1,0 +1,278 @@
+From 6805a235de50925ed7f30ac79b3d96be3f5d71df Mon Sep 17 00:00:00 2001
+From: Tomas Jelinek <tojeline@redhat.com>
+Date: Mon, 25 Jul 2016 14:23:23 +0200
+Subject: [PATCH 1/2] remove dead code
+
+Function resource_master_remove could not ever be called because conditions
+with xpath queries were never True. In the case when the resource_id was
+an id of a master resource, it got changed to the id of the master's child
+right at the beginning of resource_remove function.
+---
+ pcs/resource.py | 49 ++++++-------------------------------------------
+ 1 file changed, 6 insertions(+), 43 deletions(-)
+
+diff --git a/pcs/resource.py b/pcs/resource.py
+index 9384a21..24128ba 100644
+--- a/pcs/resource.py
++++ b/pcs/resource.py
+@@ -1618,45 +1618,9 @@ def resource_master_create(dom, argv, update=False, master_id=None):
+ 
+     return dom, master_element.getAttribute("id")
+ 
+-def resource_master_remove(argv):
+-    if len(argv) < 1:
+-        usage.resource()
+-        sys.exit(1)
+-
+-    dom = utils.get_cib_dom()
+-    master_id = argv.pop(0)
+-
+-    master_found = False
+-# Check to see if there's a resource/group with the master_id if so, we remove the parent
+-    for rg in (dom.getElementsByTagName("primitive") + dom.getElementsByTagName("group")):
+-        if rg.getAttribute("id") == master_id and rg.parentNode.tagName == "master":
+-            master_id = rg.parentNode.getAttribute("id")
+-
+-    resources_to_cleanup = []
+-    for master in dom.getElementsByTagName("master"):
+-        if master.getAttribute("id") == master_id:
+-            childNodes = master.getElementsByTagName("primitive")
+-            for child in childNodes:
+-                resources_to_cleanup.append(child.getAttribute("id"))
+-            master_found = True
+-            break
+-
+-    if not master_found:
+-        utils.err("Unable to find multi-state resource with id %s" % master_id)
+-
+-    constraints_element = dom.getElementsByTagName("constraints")
+-    if len(constraints_element) > 0:
+-        constraints_element = constraints_element[0]
+-        for resource_id in resources_to_cleanup:
+-            remove_resource_references(
+-                dom, resource_id, constraints_element=constraints_element
+-            )
+-    master.parentNode.removeChild(master)
+-    print("Removing Master - " + master_id)
+-    utils.replace_cib_configuration(dom)
+-
+ def resource_remove(resource_id, output = True):
+     dom = utils.get_cib_dom()
++    # if resource is a clone or a master, work with its child instead
+     cloned_resource = utils.dom_get_clone_ms_resource(dom, resource_id)
+     if cloned_resource:
+         resource_id = cloned_resource.getAttribute("id")
+@@ -1704,16 +1668,15 @@ def resource_remove(resource_id, output = True):
+             resource_remove(res.getAttribute("id"))
+         sys.exit(0)
+ 
++    # now we know resource is not a group, a clone nor a master
++    # because of the conditions above
++    if not utils.does_exist('//resources/descendant::primitive[@id="'+resource_id+'"]'):
++        utils.err("Resource '{0}' does not exist.".format(resource_id))
++
+     group_xpath = '//group/primitive[@id="'+resource_id+'"]/..'
+     group = utils.get_cib_xpath(group_xpath)
+     num_resources_in_group = 0
+ 
+-    if not utils.does_exist('//resources/descendant::primitive[@id="'+resource_id+'"]'):
+-        if utils.does_exist('//resources/master[@id="'+resource_id+'"]'):
+-            return resource_master_remove([resource_id])
+-
+-        utils.err("Resource '{0}' does not exist.".format(resource_id))
+-
+     if (group != ""):
+         num_resources_in_group = len(parseString(group).documentElement.getElementsByTagName("primitive"))
+ 
+-- 
+1.8.3.1
+
+
+From cd96c34c7ad1f4f767c0d14475b683a70c3b0862 Mon Sep 17 00:00:00 2001
+From: Tomas Jelinek <tojeline@redhat.com>
+Date: Mon, 25 Jul 2016 17:34:35 +0200
+Subject: [PATCH 2/2] when removing a remote node remove it from pacemaker's
+ caches as well
+
+---
+ pcs/cluster.py         |  6 +++++
+ pcs/resource.py        | 64 ++++++++++++++++++++++++++++----------------------
+ pcs/test/test_utils.py |  9 +++++++
+ pcs/utils.py           |  8 +++++++
+ 4 files changed, 59 insertions(+), 28 deletions(-)
+
+diff --git a/pcs/cluster.py b/pcs/cluster.py
+index 7a8615d..1c3b425 100644
+--- a/pcs/cluster.py
++++ b/pcs/cluster.py
+@@ -1922,6 +1922,12 @@ def cluster_remote_node(argv):
+             nvpair.parentNode.removeChild(nvpair)
+         dom = constraint.remove_constraints_containing_node(dom, hostname)
+         utils.replace_cib_configuration(dom)
++        if not utils.usefile:
++            output, retval = utils.run([
++                "crm_node", "--force", "--remove", hostname
++            ])
++            if retval != 0:
++                utils.err("unable to remove: {0}".fomat(output))
+     else:
+         usage.cluster(["remote-node"])
+         sys.exit(1)
+diff --git a/pcs/resource.py b/pcs/resource.py
+index 24128ba..a85f46f 100644
+--- a/pcs/resource.py
++++ b/pcs/resource.py
+@@ -929,31 +929,11 @@ def resource_update(res_id,args):
+             ia.setAttribute("value", val)
+             instance_attributes.appendChild(ia)
+ 
+-    meta_attributes = resource.getElementsByTagName("meta_attributes")
+-    if len(meta_attributes) == 0:
+-        meta_attributes = dom.createElement("meta_attributes")
+-        meta_attributes.setAttribute("id", res_id + "-meta_attributes")
+-        resource.appendChild(meta_attributes)
+-    else:
+-        meta_attributes = meta_attributes[0]
+-
+-    meta_attrs = utils.convert_args_to_tuples(meta_values)
+-    for (key,val) in meta_attrs:
+-        meta_found = False
+-        for ma in meta_attributes.getElementsByTagName("nvpair"):
+-            if ma.getAttribute("name") == key:
+-                meta_found = True
+-                if val == "":
+-                    meta_attributes.removeChild(ma)
+-                else:
+-                    ma.setAttribute("value", val)
+-                break
+-        if not meta_found:
+-            ma = dom.createElement("nvpair")
+-            ma.setAttribute("id", res_id + "-meta_attributes-" + key)
+-            ma.setAttribute("name", key)
+-            ma.setAttribute("value", val)
+-            meta_attributes.appendChild(ma)
++    remote_node_name = utils.dom_get_resource_remote_node_name(resource)
++    utils.dom_update_meta_attr(
++        resource,
++        utils.convert_args_to_tuples(meta_values)
++    )
+ 
+     operations = resource.getElementsByTagName("operations")
+     if len(operations) == 0:
+@@ -1005,6 +985,17 @@ def resource_update(res_id,args):
+ 
+     utils.replace_cib_configuration(dom)
+ 
++    if (
++        remote_node_name
++        and
++        remote_node_name != utils.dom_get_resource_remote_node_name(resource)
++    ):
++        # if the resource was a remote node and it is not anymore, (or its name
++        # changed) we need to tell pacemaker about it
++        output, retval = utils.run([
++            "crm_node", "--force", "--remove", remote_node_name
++        ])
++
+     if "--wait" in utils.pcs_options:
+         args = ["crm_resource", "--wait"]
+         if wait_timeout:
+@@ -1231,10 +1222,22 @@ def resource_meta(res_id, argv):
+     if "--wait" in utils.pcs_options:
+         wait_timeout = utils.validate_wait_get_timeout()
+ 
++    remote_node_name = utils.dom_get_resource_remote_node_name(resource_el)
+     utils.dom_update_meta_attr(resource_el, utils.convert_args_to_tuples(argv))
+ 
+     utils.replace_cib_configuration(dom)
+ 
++    if (
++        remote_node_name
++        and
++        remote_node_name != utils.dom_get_resource_remote_node_name(resource_el)
++    ):
++        # if the resource was a remote node and it is not anymore, (or its name
++        # changed) we need to tell pacemaker about it
++        output, retval = utils.run([
++            "crm_node", "--force", "--remove", remote_node_name
++        ])
++
+     if "--wait" in utils.pcs_options:
+         args = ["crm_resource", "--wait"]
+         if wait_timeout:
+@@ -1714,11 +1717,12 @@ def resource_remove(resource_id, output = True):
+     )
+     dom = utils.get_cib_dom()
+     resource_el = utils.dom_get_resource(dom, resource_id)
++    remote_node_name = None
+     if resource_el:
+-        remote_node = utils.dom_get_resource_remote_node_name(resource_el)
+-        if remote_node:
++        remote_node_name = utils.dom_get_resource_remote_node_name(resource_el)
++        if remote_node_name:
+             dom = constraint.remove_constraints_containing_node(
+-                dom, remote_node, output
++                dom, remote_node_name, output
+             )
+             utils.replace_cib_configuration(dom)
+             dom = utils.get_cib_dom()
+@@ -1784,6 +1788,10 @@ def resource_remove(resource_id, output = True):
+             if output == True:
+                 utils.err("Unable to remove resource '%s' (do constraints exist?)" % (resource_id))
+             return False
++    if remote_node_name and not utils.usefile:
++        output, retval = utils.run([
++            "crm_node", "--force", "--remove", remote_node_name
++        ])
+     return True
+ 
+ def stonith_level_rm_device(cib_dom, stn_id):
+diff --git a/pcs/test/test_utils.py b/pcs/test/test_utils.py
+index 819f8ee..192048e 100644
+--- a/pcs/test/test_utils.py
++++ b/pcs/test/test_utils.py
+@@ -273,6 +273,9 @@ class UtilsTest(unittest.TestCase):
+                             name="remote-node" value="guest2"/>
+                     </instance_attributes>
+                 </primitive>
++                <primitive id="dummy3"
++                        class="ocf" provider="pacemaker" type="remote">
++                </primitive>
+             </resources>
+         """).documentElement
+         resources = dom.getElementsByTagName("resources")[0]
+@@ -296,6 +299,12 @@ class UtilsTest(unittest.TestCase):
+                 utils.dom_get_resource(dom, "vm-guest1")
+             )
+         )
++        self.assertEqual(
++            "dummy3",
++            utils.dom_get_resource_remote_node_name(
++                utils.dom_get_resource(dom, "dummy3")
++            )
++        )
+ 
+     def test_dom_get_meta_attr_value(self):
+         dom = self.get_cib_empty()
+diff --git a/pcs/utils.py b/pcs/utils.py
+index a7ed975..25274dc 100644
+--- a/pcs/utils.py
++++ b/pcs/utils.py
+@@ -1252,6 +1252,14 @@ def validate_constraint_resource(dom, resource_id):
+ def dom_get_resource_remote_node_name(dom_resource):
+     if dom_resource.tagName != "primitive":
+         return None
++    if (
++        dom_resource.getAttribute("class").lower() == "ocf"
++        and
++        dom_resource.getAttribute("provider").lower() == "pacemaker"
++        and
++        dom_resource.getAttribute("type").lower() == "remote"
++    ):
++        return dom_resource.getAttribute("id")
+     return dom_get_meta_attr_value(dom_resource, "remote-node")
+ 
+ def dom_get_meta_attr_value(dom_resource, meta_name):
+-- 
+1.8.3.1
+

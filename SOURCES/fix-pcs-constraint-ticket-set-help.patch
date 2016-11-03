@@ -1,0 +1,41 @@
+From 10ed9eaf5f9485b0186fdc1546e22bb321d47e85 Mon Sep 17 00:00:00 2001
+From: Tomas Jelinek <tojeline@redhat.com>
+Date: Thu, 23 Jun 2016 13:31:29 +0200
+Subject: [PATCH] fix "pcs constraint ticket set" help
+
+---
+ pcs/pcs.8    | 2 +-
+ pcs/usage.py | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/pcs/pcs.8 b/pcs/pcs.8
+index 38a4913..0e230b7 100644
+--- a/pcs/pcs.8
++++ b/pcs/pcs.8
+@@ -482,7 +482,7 @@ ticket add <ticket> [<role>] <resource id> [options] [id=constraint\-id]
+ Create a ticket constraint for <resource id>. Available option is loss-policy=fence/stop/freeze/demote. A role can be master, slave, started or stopped.
+ .TP
+ ticket set <resource1> [resourceN]... [options] [set <resourceX> ... [options]] [setoptions [constraint_options]]
+-Create a ticket constraint with a resource set. Available options are sequential=true/false, require-all=true/false, action=start/promote/demote/stop and role=Stopped/Started/Master/Slave. Required constraint option is ticket. Optional constraint option is loss-policy=fence/stop/freeze/demote.
++Create a ticket constraint with a resource set. Available options are sequential=true/false, require-all=true/false, action=start/promote/demote/stop and role=Stopped/Started/Master/Slave. Required constraint option is ticket=<ticket>. Optional constraint options are id=<constraint-id> and loss-policy=fence/stop/freeze/demote.
+ .TP
+ remove [constraint id]...
+ Remove constraint(s) or constraint rules with the specified id(s).
+diff --git a/pcs/usage.py b/pcs/usage.py
+index 9d24b78..c4c417a 100644
+--- a/pcs/usage.py
++++ b/pcs/usage.py
+@@ -998,8 +998,8 @@ Commands:
+         Create a ticket constraint with a resource set.
+         Available options are sequential=true/false, require-all=true/false,
+         action=start/promote/demote/stop and role=Stopped/Started/Master/Slave.
+-        Required constraint option is ticket.
+-        Optional constraint option is loss-policy=fence/stop/freeze/demote.
++        Required constraint option is ticket=<ticket>. Optional constraint
++        options are id=<constraint-id> and loss-policy=fence/stop/freeze/demote.
+ 
+     remove [constraint id]...
+         Remove constraint(s) or constraint rules with the specified id(s).
+-- 
+1.8.3.1
+

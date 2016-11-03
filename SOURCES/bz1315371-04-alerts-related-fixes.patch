@@ -1,0 +1,373 @@
+From b438fe5c0eb4e6fa738e21287540c0d8f6b91c68 Mon Sep 17 00:00:00 2001
+From: Ivan Devat <idevat@redhat.com>
+Date: Fri, 19 Aug 2016 02:57:39 +0200
+Subject: [PATCH] squash bz1315371 [RFE] Provide configurable alerts
+
+25a25c534ff6 show help when unknown subcommand of 'pcs alert recipient' was given
+
+c352ce184093 make syntax of command 'pcs alert recipient add' more consistent
+
+8c6ec586d57c fix error handling when upgrading cib schema
+---
+ pcs/alert.py                   |  9 +++--
+ pcs/lib/cib/tools.py           | 36 +++++++++--------
+ pcs/pcs.8                      |  2 +-
+ pcs/test/test_alert.py         | 44 +++++++++++++-------
+ pcs/test/test_lib_cib_tools.py | 91 ++++++++++++++++++++++++++++++++++++++++++
+ pcs/usage.py                   |  2 +-
+ 6 files changed, 147 insertions(+), 37 deletions(-)
+
+diff --git a/pcs/alert.py b/pcs/alert.py
+index 693bb8d..17f4e8d 100644
+--- a/pcs/alert.py
++++ b/pcs/alert.py
+@@ -63,6 +63,8 @@ def recipient_cmd(*args):
+             recipient_update(*args)
+         elif sub_cmd == "remove":
+             recipient_remove(*args)
++        else:
++            raise CmdLineInputError()
+     except CmdLineInputError as e:
+         utils.exit_on_cmdline_input_errror(
+             e, "alert", "recipient {0}".format(sub_cmd)
+@@ -127,15 +129,14 @@ def recipient_add(lib, argv, modifiers):
+         raise CmdLineInputError()
+ 
+     alert_id = argv[0]
+-    recipient_value = argv[1]
+ 
+-    sections = parse_cmd_sections(argv[2:], set(["options", "meta"]))
++    sections = parse_cmd_sections(argv[1:], set(["options", "meta"]))
+     main_args = prepare_options(sections["main"])
+-    ensure_only_allowed_options(main_args, ["description", "id"])
++    ensure_only_allowed_options(main_args, ["description", "id", "value"])
+ 
+     lib.alert.add_recipient(
+         alert_id,
+-        recipient_value,
++        main_args.get("value", None),
+         prepare_options(sections["options"]),
+         prepare_options(sections["meta"]),
+         recipient_id=main_args.get("id", None),
+diff --git a/pcs/lib/cib/tools.py b/pcs/lib/cib/tools.py
+index d8ce57a..8141360 100644
+--- a/pcs/lib/cib/tools.py
++++ b/pcs/lib/cib/tools.py
+@@ -176,29 +176,31 @@ def upgrade_cib(cib, runner):
+     cib -- cib etree
+     runner -- CommandRunner
+     """
+-    temp_file = tempfile.NamedTemporaryFile("w+", suffix=".pcs")
+-    temp_file.write(etree.tostring(cib).decode())
+-    temp_file.flush()
+-    output, retval = runner.run(
+-        [
+-            os.path.join(settings.pacemaker_binaries, "cibadmin"),
+-            "--upgrade",
+-            "--force"
+-        ],
+-        env_extend={"CIB_file": temp_file.name}
+-    )
++    temp_file = None
++    try:
++        temp_file = tempfile.NamedTemporaryFile("w+", suffix=".pcs")
++        temp_file.write(etree.tostring(cib).decode())
++        temp_file.flush()
++        output, retval = runner.run(
++            [
++                os.path.join(settings.pacemaker_binaries, "cibadmin"),
++                "--upgrade",
++                "--force"
++            ],
++            env_extend={"CIB_file": temp_file.name}
++        )
+ 
+-    if retval != 0:
+-        temp_file.close()
+-        LibraryError(reports.cib_upgrade_failed(output))
++        if retval != 0:
++            temp_file.close()
++            raise LibraryError(reports.cib_upgrade_failed(output))
+ 
+-    try:
+         temp_file.seek(0)
+         return etree.fromstring(temp_file.read())
+     except (EnvironmentError, etree.XMLSyntaxError, etree.DocumentInvalid) as e:
+-        LibraryError(reports.cib_upgrade_failed(str(e)))
++        raise LibraryError(reports.cib_upgrade_failed(str(e)))
+     finally:
+-        temp_file.close()
++        if temp_file:
++            temp_file.close()
+ 
+ 
+ def ensure_cib_version(runner, cib, version):
+diff --git a/pcs/pcs.8 b/pcs/pcs.8
+index 7a054ca..b3c4877 100644
+--- a/pcs/pcs.8
++++ b/pcs/pcs.8
+@@ -727,7 +727,7 @@ Update existing alert handler with specified id.
+ remove <alert\-id>
+ Remove alert handler with specified id.
+ .TP
+-recipient add <alert\-id> <recipient\-value> [id=<recipient\-id>] [description=<description>] [options [<option>=<value>]...] [meta [<meta-option>=<value>]...]
++recipient add <alert\-id> value=<recipient\-value> [id=<recipient\-id>] [description=<description>] [options [<option>=<value>]...] [meta [<meta-option>=<value>]...]
+ Add new recipient to specified alert handler.
+ .TP
+ recipient update <recipient\-id> [value=<recipient\-value>] [description=<description>] [options [<option>=<value>]...] [meta [<meta-option>=<value>]...]
+diff --git a/pcs/test/test_alert.py b/pcs/test/test_alert.py
+index f6ea70d..d919ff6 100644
+--- a/pcs/test/test_alert.py
++++ b/pcs/test/test_alert.py
+@@ -233,7 +233,7 @@ Alerts:
+  Alert: alert (path=test)
+ """
+         )
+-        self.assert_pcs_success("alert recipient add alert rec_value")
++        self.assert_pcs_success("alert recipient add alert value=rec_value")
+         self.assert_pcs_success(
+             "alert config",
+             """\
+@@ -244,7 +244,7 @@ Alerts:
+ """
+         )
+         self.assert_pcs_success(
+-            "alert recipient add alert rec_value2 id=my-recipient "
++            "alert recipient add alert value=rec_value2 id=my-recipient "
+             "description=description options o1=1 o2=2 meta m1=v1 m2=v2"
+         )
+         self.assert_pcs_success(
+@@ -263,21 +263,25 @@ Alerts:
+ 
+     def test_already_exists(self):
+         self.assert_pcs_success("alert create path=test")
+-        self.assert_pcs_success("alert recipient add alert rec_value id=rec")
++        self.assert_pcs_success(
++            "alert recipient add alert value=rec_value id=rec"
++        )
+         self.assert_pcs_fail(
+-            "alert recipient add alert value id=rec",
++            "alert recipient add alert value=value id=rec",
+             "Error: 'rec' already exists\n"
+         )
+         self.assert_pcs_fail(
+-            "alert recipient add alert value id=alert",
++            "alert recipient add alert value=value id=alert",
+             "Error: 'alert' already exists\n"
+         )
+ 
+     def test_same_value(self):
+         self.assert_pcs_success("alert create path=test")
+-        self.assert_pcs_success("alert recipient add alert rec_value id=rec")
++        self.assert_pcs_success(
++            "alert recipient add alert value=rec_value id=rec"
++        )
+         self.assert_pcs_fail(
+-            "alert recipient add alert rec_value",
++            "alert recipient add alert value=rec_value",
+             "Error: Recipient 'rec_value' in alert 'alert' already exists, "
+             "use --force to override\n"
+         )
+@@ -291,7 +295,7 @@ Alerts:
+ """
+         )
+         self.assert_pcs_success(
+-            "alert recipient add alert rec_value --force",
++            "alert recipient add alert value=rec_value --force",
+             "Warning: Recipient 'rec_value' in alert 'alert' already exists\n"
+         )
+         self.assert_pcs_success(
+@@ -305,13 +309,21 @@ Alerts:
+ """
+         )
+ 
++    def test_no_value(self):
++        self.assert_pcs_success("alert create path=test")
++        self.assert_pcs_fail(
++            "alert recipient add alert id=rec",
++            "Error: required option 'value' is missing\n"
++        )
++
++
+ 
+ @unittest.skipUnless(ALERTS_SUPPORTED, ALERTS_NOT_SUPPORTED_MSG)
+ class UpdateRecipientAlert(PcsAlertTest):
+     def test_success(self):
+         self.assert_pcs_success("alert create path=test")
+         self.assert_pcs_success(
+-            "alert recipient add alert rec_value description=description "
++            "alert recipient add alert value=rec_value description=description "
+             "options o1=1 o2=2 meta m1=v1 m2=v2"
+         )
+         self.assert_pcs_success(
+@@ -360,8 +372,8 @@ Alerts:
+ 
+     def test_value_exists(self):
+         self.assert_pcs_success("alert create path=test")
+-        self.assert_pcs_success("alert recipient add alert rec_value")
+-        self.assert_pcs_success("alert recipient add alert value")
++        self.assert_pcs_success("alert recipient add alert value=rec_value")
++        self.assert_pcs_success("alert recipient add alert value=value")
+         self.assert_pcs_success(
+             "alert config",
+             """\
+@@ -394,7 +406,7 @@ Alerts:
+ 
+     def test_value_same_as_previous(self):
+         self.assert_pcs_success("alert create path=test")
+-        self.assert_pcs_success("alert recipient add alert rec_value")
++        self.assert_pcs_success("alert recipient add alert value=rec_value")
+         self.assert_pcs_success(
+             "alert config",
+             """\
+@@ -425,7 +437,9 @@ Alerts:
+ 
+     def test_empty_value(self):
+         self.assert_pcs_success("alert create path=test")
+-        self.assert_pcs_success("alert recipient add alert rec_value id=rec")
++        self.assert_pcs_success(
++            "alert recipient add alert value=rec_value id=rec"
++        )
+         self.assert_pcs_fail(
+             "alert recipient update rec value=",
+             "Error: Recipient value '' is not valid.\n"
+@@ -436,7 +450,9 @@ Alerts:
+ class RemoveRecipientTest(PcsAlertTest):
+     def test_success(self):
+         self.assert_pcs_success("alert create path=test")
+-        self.assert_pcs_success("alert recipient add alert rec_value id=rec")
++        self.assert_pcs_success(
++            "alert recipient add alert value=rec_value id=rec"
++        )
+         self.assert_pcs_success(
+             "alert config",
+             """\
+diff --git a/pcs/test/test_lib_cib_tools.py b/pcs/test/test_lib_cib_tools.py
+index 10f8a96..0fd4d22 100644
+--- a/pcs/test/test_lib_cib_tools.py
++++ b/pcs/test/test_lib_cib_tools.py
+@@ -7,6 +7,7 @@ from __future__ import (
+ 
+ from unittest import TestCase
+ 
++from os.path import join
+ from lxml import etree
+ 
+ from pcs.test.tools.assertions import (
+@@ -17,6 +18,7 @@ from pcs.test.tools.misc import get_test_resource as rc
+ from pcs.test.tools.pcs_mock import mock
+ from pcs.test.tools.xml import get_xml_manipulation_creator_from_file
+ 
++from pcs import settings
+ from pcs.common import report_codes
+ from pcs.lib.external import CommandRunner
+ from pcs.lib.errors import ReportItemSeverity as severities
+@@ -369,3 +371,92 @@ class EnsureCibVersionTest(TestCase):
+             )
+         )
+         mock_upgrade_cib.assert_called_once_with(self.cib, self.mock_runner)
++
++
++@mock.patch("tempfile.NamedTemporaryFile")
++class UpgradeCibTest(TestCase):
++    def setUp(self):
++        self.mock_runner = mock.MagicMock(spec_set=CommandRunner)
++
++    def test_success(self, mock_named_file):
++        mock_file = mock.MagicMock()
++        mock_file.name = "mock_file_name"
++        mock_file.read.return_value = "<cib/>"
++        mock_named_file.return_value = mock_file
++        self.mock_runner.run.return_value = ("", 0)
++        assert_xml_equal(
++            "<cib/>",
++            etree.tostring(
++                lib.upgrade_cib(etree.XML("<old_cib/>"), self.mock_runner)
++            ).decode()
++        )
++        mock_named_file.assert_called_once_with("w+", suffix=".pcs")
++        mock_file.write.assert_called_once_with("<old_cib/>")
++        mock_file.flush.assert_called_once_with()
++        self.mock_runner.run.assert_called_once_with(
++            [
++                join(settings.pacemaker_binaries, "cibadmin"),
++                "--upgrade",
++                "--force"
++            ],
++            env_extend={"CIB_file": "mock_file_name"}
++        )
++        mock_file.seek.assert_called_once_with(0)
++        mock_file.read.assert_called_once_with()
++
++    def test_upgrade_failed(self, mock_named_file):
++        mock_file = mock.MagicMock()
++        mock_file.name = "mock_file_name"
++        mock_named_file.return_value = mock_file
++        self.mock_runner.run.return_value = ("reason", 1)
++        assert_raise_library_error(
++            lambda: lib.upgrade_cib(etree.XML("<old_cib/>"), self.mock_runner),
++            (
++                severities.ERROR,
++                report_codes.CIB_UPGRADE_FAILED,
++                {"reason": "reason"}
++            )
++        )
++        mock_named_file.assert_called_once_with("w+", suffix=".pcs")
++        mock_file.write.assert_called_once_with("<old_cib/>")
++        mock_file.flush.assert_called_once_with()
++        self.mock_runner.run.assert_called_once_with(
++            [
++                join(settings.pacemaker_binaries, "cibadmin"),
++                "--upgrade",
++                "--force"
++            ],
++            env_extend={"CIB_file": "mock_file_name"}
++        )
++
++    def test_unable_to_parse_upgraded_cib(self, mock_named_file):
++        mock_file = mock.MagicMock()
++        mock_file.name = "mock_file_name"
++        mock_file.read.return_value = "not xml"
++        mock_named_file.return_value = mock_file
++        self.mock_runner.run.return_value = ("", 0)
++        assert_raise_library_error(
++            lambda: lib.upgrade_cib(etree.XML("<old_cib/>"), self.mock_runner),
++            (
++                severities.ERROR,
++                report_codes.CIB_UPGRADE_FAILED,
++                {
++                    "reason":
++                        "Start tag expected, '<' not found, line 1, column 1",
++                }
++            )
++        )
++        mock_named_file.assert_called_once_with("w+", suffix=".pcs")
++        mock_file.write.assert_called_once_with("<old_cib/>")
++        mock_file.flush.assert_called_once_with()
++        self.mock_runner.run.assert_called_once_with(
++            [
++                join(settings.pacemaker_binaries, "cibadmin"),
++                "--upgrade",
++                "--force"
++            ],
++            env_extend={"CIB_file": "mock_file_name"}
++        )
++        mock_file.seek.assert_called_once_with(0)
++        mock_file.read.assert_called_once_with()
++
+diff --git a/pcs/usage.py b/pcs/usage.py
+index 9ebbca9..78e340b 100644
+--- a/pcs/usage.py
++++ b/pcs/usage.py
+@@ -1507,7 +1507,7 @@ Commands:
+     remove <alert-id>
+         Remove alert handler with specified id.
+ 
+-    recipient add <alert-id> <recipient-value> [id=<recipient-id>]
++    recipient add <alert-id> value=<recipient-value> [id=<recipient-id>]
+             [description=<description>] [options [<option>=<value>]...]
+             [meta [<meta-option>=<value>]...]
+         Add new recipient to specified alert handler.
+-- 
+1.8.3.1
+

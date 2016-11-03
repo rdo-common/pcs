@@ -1,0 +1,67 @@
+From a315196a5f9fc70ce1cd4b56648f262048bb93f1 Mon Sep 17 00:00:00 2001
+From: Ondrej Mular <omular@redhat.com>
+Date: Mon, 25 Jul 2016 14:10:55 +0200
+Subject: [PATCH] improve alerts help
+
+---
+ pcs/pcs.8    | 8 ++++----
+ pcs/usage.py | 8 ++++----
+ 2 files changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/pcs/pcs.8 b/pcs/pcs.8
+index f789df7..0e8e967 100644
+--- a/pcs/pcs.8
++++ b/pcs/pcs.8
+@@ -667,16 +667,16 @@ Add specified utilization options to specified node.  If node is not specified,
+ Show all configured alerts.
+ .TP
+ create path=<path> [id=<alert\-id>] [description=<description>] [options [<option>=<value>]...] [meta [<meta\-option>=<value>]...]
+-Create new alert with specified path. Id will be automatically generated if it is not specified.
++Define an alert handler with specified path. Id will be automatically generated if it is not specified.
+ .TP
+ update <alert\-id> [path=<path>] [description=<description>] [options [<option>=<value>]...] [meta [<meta\-option>=<value>]...]
+-Update existing alert with specified id.
++Update existing alert handler with specified id.
+ .TP
+ remove <alert\-id>
+-Remove alert with specified id.
++Remove alert handler with specified id.
+ .TP
+ recipient add <alert\-id> <recipient\-value> [id=<recipient\-id>] [description=<description>] [options [<option>=<value>]...] [meta [<meta-option>=<value>]...]
+-Add new recipient to specified alert.
++Add new recipient to specified alert handler.
+ .TP
+ recipient update <recipient\-id> [value=<recipient\-value>] [description=<description>] [options [<option>=<value>]...] [meta [<meta-option>=<value>]...]
+ Update existing recipient identified by it's id.
+diff --git a/pcs/usage.py b/pcs/usage.py
+index 2f8f855..7cfb33e 100644
+--- a/pcs/usage.py
++++ b/pcs/usage.py
+@@ -1416,20 +1416,20 @@ Commands:
+ 
+     create path=<path> [id=<alert-id>] [description=<description>]
+             [options [<option>=<value>]...] [meta [<meta-option>=<value>]...]
+-        Create new alert with specified path. Id will be automatically
++        Define an alert handler with specified path. Id will be automatically
+         generated if it is not specified.
+ 
+     update <alert-id> [path=<path>] [description=<description>]
+             [options [<option>=<value>]...] [meta [<meta-option>=<value>]...]
+-        Update existing alert with specified id.
++        Update existing alert handler with specified id.
+ 
+     remove <alert-id>
+-        Remove alert with specified id.
++        Remove alert handler with specified id.
+ 
+     recipient add <alert-id> <recipient-value> [id=<recipient-id>]
+             [description=<description>] [options [<option>=<value>]...]
+             [meta [<meta-option>=<value>]...]
+-        Add new recipient to specified alert.
++        Add new recipient to specified alert handler.
+ 
+     recipient update <recipient-id> [value=<recipient-value>]
+             [description=<description>] [options [<option>=<value>]...]
+-- 
+1.8.3.1
+
