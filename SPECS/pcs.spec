@@ -1,6 +1,6 @@
 Name: pcs		
 Version: 0.9.152
-Release: 10%{?dist}
+Release: 10%{?dist}.1
 License: GPLv2
 URL: https://github.com/ClusterLabs/pcs
 Group: System Environment/Base
@@ -25,7 +25,6 @@ Source12: https://rubygems.org/downloads/sinatra-contrib-1.4.7.gem
 Source13: https://rubygems.org/downloads/sinatra-1.4.7.gem
 Source14: https://rubygems.org/downloads/tilt-2.0.3.gem
 Source15: https://github.com/testing-cabal/mock/archive/1.0.1.tar.gz#/mock-1.0.1.tar.gz
-Source99: favicon.ico
 
 Patch0: bz1315371-01-add-support-for-pacemaker-alerts.patch
 Patch1: bz1158805-01-add-support-for-qdevice-qnetd-provided-.patch
@@ -85,6 +84,8 @@ Patch53: bz1305049-02-pcs-does-not-support-ticket-constraints.patch
 Patch54: rhel7.patch
 Patch55: change-cman-to-rhel6-in-messages.patch
 Patch56: show-only-warning-when-crm_mon-xml-is-invalid.patch
+Patch57: bz1408476-01-accept-RA-with-instantiated-systemd-service-in-name.patch
+Patch58: bz1404233-01-cluster-cib-push-allows-to-obtain-and-push-a-diff.patch
 
 BuildRequires: python2-devel python-setuptools
 BuildRequires: gcc gcc-c++
@@ -201,9 +202,12 @@ UpdateTimestamps -p1 %{PATCH51}
 UpdateTimestamps -p1 %{PATCH52}
 UpdateTimestamps -p1 %{PATCH53}
 UpdateTimestamps -p1 %{PATCH54}
+UpdateTimestamps -p1 %{PATCH55}
+UpdateTimestamps -p1 %{PATCH56}
+UpdateTimestamps -p1 %{PATCH57}
+UpdateTimestamps -p1 %{PATCH58}
 
 cp -f %SOURCE1 pcsd/public/images
-cp -f %SOURCE99 pcsd/public
 
 mkdir -p pcsd/.bundle
 cp -f %SOURCE2 pcsd/.bundle/config
@@ -348,8 +352,10 @@ run_all_tests
 %doc COPYING README
 
 %changelog
-* Tue Nov 15 2016 Johnny Hughes <johnny@centos.org> - 0.9.152-10
-- Roll in CentOS Branding (centos bug #9426)
+* Mon Jan 16 2017  Ivan Devat <idevat@redhat.com> - 0.9.152-10.el7_3.1
+- Fixed resolving resource agent name containing systemd service instance
+- Added posibility to push only diff of cib in 'cluster cib push'
+- Resolves: rhbz#1408476 rhbz#1404233
 
 * Tue Sep 20 2016 Ivan Devat <idevat@redhat.com> - 0.9.152-10
 - Fixed error when stopping qdevice if is not running

@@ -1,0 +1,30 @@
+From efd4958f35d7760bd4d80c4d82e257708c25416d Mon Sep 17 00:00:00 2001
+From: Ivan Devat <idevat@redhat.com>
+Date: Fri, 6 Jan 2017 09:06:35 +0100
+Subject: [PATCH] accept RA with instantiated systemd serv. in name
+
+Accept resource agent with instantiated systemd service in name.
+---
+ pcs/utils.py | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/pcs/utils.py b/pcs/utils.py
+index d5b6dcf..6daecf3 100644
+--- a/pcs/utils.py
++++ b/pcs/utils.py
+@@ -1524,6 +1524,12 @@ def is_valid_resource(resource, caseInsensitiveCheck=False):
+         return is_file_abs_path(agent)
+     elif resource.startswith("systemd:"):
+         _, agent_name = resource.split(":", 1)
++        # For Instantiated services we need to make sure that the
++        # <agent_name>@.service file exists
++        # For example: we need recognize systemd:getty@tty3 as existing service.
++        if '@' in agent_name:
++            agent_name, instance_name = agent_name.split("@", 1)
++            agent_name += '@'
+         agent1 = os.path.join(
+             "/etc/systemd/system/", agent_name + ".service"
+         )
+-- 
+1.8.3.1
+
