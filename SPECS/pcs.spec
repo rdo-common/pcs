@@ -1,6 +1,6 @@
 Name: pcs		
 Version: 0.9.152
-Release: 10%{?dist}.1
+Release: 10%{?dist}.3
 License: GPLv2
 URL: https://github.com/ClusterLabs/pcs
 Group: System Environment/Base
@@ -25,7 +25,6 @@ Source12: https://rubygems.org/downloads/sinatra-contrib-1.4.7.gem
 Source13: https://rubygems.org/downloads/sinatra-1.4.7.gem
 Source14: https://rubygems.org/downloads/tilt-2.0.3.gem
 Source15: https://github.com/testing-cabal/mock/archive/1.0.1.tar.gz#/mock-1.0.1.tar.gz
-Source99: favicon.ico
 
 Patch0: bz1315371-01-add-support-for-pacemaker-alerts.patch
 Patch1: bz1158805-01-add-support-for-qdevice-qnetd-provided-.patch
@@ -87,6 +86,8 @@ Patch55: change-cman-to-rhel6-in-messages.patch
 Patch56: show-only-warning-when-crm_mon-xml-is-invalid.patch
 Patch57: bz1408476-01-accept-RA-with-instantiated-systemd-service-in-name.patch
 Patch58: bz1404233-01-cluster-cib-push-allows-to-obtain-and-push-a-diff.patch
+Patch59: bz1420757-01-fix-pcs-cluster-cib-push-scope.patch
+Patch60: bz1420757-02-fix-cib-push-diff-against-when-the-diff-is-empty.patch
 
 BuildRequires: python2-devel python-setuptools
 BuildRequires: gcc gcc-c++
@@ -207,9 +208,10 @@ UpdateTimestamps -p1 %{PATCH55}
 UpdateTimestamps -p1 %{PATCH56}
 UpdateTimestamps -p1 %{PATCH57}
 UpdateTimestamps -p1 %{PATCH58}
+UpdateTimestamps -p1 %{PATCH59}
+UpdateTimestamps -p1 %{PATCH60}
 
 cp -f %SOURCE1 pcsd/public/images
-cp -f %SOURCE99 pcsd/public
 
 mkdir -p pcsd/.bundle
 cp -f %SOURCE2 pcsd/.bundle/config
@@ -354,8 +356,13 @@ run_all_tests
 %doc COPYING README
 
 %changelog
-* Wed Feb  1 2017  Johnny Hughes <johnny@centos.org> - 0.9.152-10.el7.centos.1
-- Roll in CentOS Branding (centos bug #9426)
+* Tue Feb 14 2017  Ivan Devat <idevat@redhat.com> - 0.9.152-10.el7_3.3
+- Provide a better error message in `pcs cluster cib-push` when the diff of the old and the new CIB is empty
+- Resolves: rhbz#1420757
+
+* Fri Feb 10 2017  Ivan Devat <idevat@redhat.com> - 0.9.152-10.el7_3.2
+- Fixed recognition of the parameter 'scope' in 'cluster cib push'
+- Resolves: rhbz#1420757
 
 * Mon Jan 16 2017  Ivan Devat <idevat@redhat.com> - 0.9.152-10.el7_3.1
 - Fixed resolving resource agent name containing systemd service instance

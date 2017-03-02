@@ -1,4 +1,4 @@
-From 24f48d185b03b3bcff28d78a3be657f2a1295e4b Mon Sep 17 00:00:00 2001
+From 5cd73a40d15e1ef692130e0a85e2f2e411bd8b66 Mon Sep 17 00:00:00 2001
 From: Tomas Jelinek <tojeline@redhat.com>
 Date: Fri, 6 Jan 2017 15:26:11 +0100
 Subject: [PATCH] 'cluster cib-push' allows to obtain and push a diff
@@ -86,7 +86,7 @@ index 4572643..69e2852 100644
          return
      cmd = ["crm_resource", "--wait"]
 diff --git a/pcs/pcs.8 b/pcs/pcs.8
-index dffaddd..bf4b859 100644
+index dffaddd..4062ce3 100644
 --- a/pcs/pcs.8
 +++ b/pcs/pcs.8
 @@ -262,8 +262,14 @@ Sync corosync configuration to all nodes found from current corosync.conf file (
@@ -95,7 +95,7 @@ index dffaddd..bf4b859 100644
  .TP
 -cib-push <filename> [scope=<scope> | \fB\-\-config\fR] [\fB\-\-wait\fR[=<n>]]
 -Push the raw xml from <filename> to the CIB (Cluster Information Base).  You can obtain the CIB by running the 'pcs cluster cib' command, which is recommended first step when you want to perform desired modifications (pcs \fB\-f\fR <command>) for the one-off push.  Specify scope to push a specific section of the CIB.  Valid values of the scope are: configuration, nodes, resources, constraints, crm_config, rsc_defaults, op_defaults.  \fB\-\-config\fR is the same as scope=configuration.  Use of \fB\-\-config\fR is recommended.  Do not specify a scope if you need to push the whole CIB or be warned in the case of outdated CIB.  If --wait is specified wait up to 'n' seconds for changes to be applied.  WARNING: the selected scope of the CIB will be overwritten by the current content of the specified file.
-+cib-push <filename> [diff\-against=<filename_original> scope=<scope> | \fB\-\-config\fR] [\fB\-\-wait\fR[=<n>]]
++cib-push <filename> [diff\-against=<filename_original> | scope=<scope> | \fB\-\-config\fR] [\fB\-\-wait\fR[=<n>]]
 +Push the raw xml from <filename> to the CIB (Cluster Information Base).  You can obtain the CIB by running the 'pcs cluster cib' command, which is recommended first step when you want to perform desired modifications (pcs \fB\-f\fR <command>) for the one\-off push.  If diff\-against is specified, pcs diffs contents of filename against contents of filename_original and pushes the result to the CIB.  Specify scope to push a specific section of the CIB.  Valid values of the scope are: configuration, nodes, resources, constraints, crm_config, rsc_defaults, op_defaults.  \fB\-\-config\fR is the same as scope=configuration.  Use of \fB\-\-config\fR is recommended.  Do not specify a scope if you need to push the whole CIB or be warned in the case of outdated CIB.  If --wait is specified wait up to 'n' seconds for changes to be applied.  WARNING: the selected scope of the CIB will be overwritten by the current content of the specified file.
 +
 +Example:

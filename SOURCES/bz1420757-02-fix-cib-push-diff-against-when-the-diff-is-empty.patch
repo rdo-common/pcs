@@ -1,0 +1,30 @@
+From 0fb8059bc401c5797ec7c1c46a8aed5ad6b63249 Mon Sep 17 00:00:00 2001
+From: Tomas Jelinek <tojeline@redhat.com>
+Date: Tue, 14 Feb 2017 09:19:15 +0100
+Subject: [PATCH 3/3] fix 'cib-push diff-against=' when the diff is empty
+
+---
+ pcs/cluster.py | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/pcs/cluster.py b/pcs/cluster.py
+index 32ea8c3..1af1ebf 100644
+--- a/pcs/cluster.py
++++ b/pcs/cluster.py
+@@ -1245,8 +1245,13 @@ def cluster_push(argv):
+         # dummy_retval == -1 means one of two things:
+         # a) an error has occured
+         # b) --original and --new differ
++        # therefore it's of no use to see if an error occurred
+         if error.strip():
+             utils.err("unable to diff the CIBs:\n" + error)
++        if not patch.strip():
++            utils.err(
++                "The new CIB is the same as the original CIB, nothing to push."
++            )
+ 
+         command = ["cibadmin", "--patch", "--xml-pipe"]
+         output, error, retval = runner.run(command, patch)
+-- 
+1.8.3.1
+
