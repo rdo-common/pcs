@@ -25,6 +25,7 @@ Source12: https://rubygems.org/downloads/sinatra-contrib-1.4.7.gem
 Source13: https://rubygems.org/downloads/sinatra-1.4.7.gem
 Source14: https://rubygems.org/downloads/tilt-2.0.3.gem
 Source15: https://github.com/testing-cabal/mock/archive/1.0.1.tar.gz#/mock-1.0.1.tar.gz
+Source99: favicon.ico
 
 Patch0: bz1315371-01-add-support-for-pacemaker-alerts.patch
 Patch1: bz1158805-01-add-support-for-qdevice-qnetd-provided-.patch
@@ -212,6 +213,7 @@ UpdateTimestamps -p1 %{PATCH59}
 UpdateTimestamps -p1 %{PATCH60}
 
 cp -f %SOURCE1 pcsd/public/images
+cp -f %SOURCE99 pcsd/public
 
 mkdir -p pcsd/.bundle
 cp -f %SOURCE2 pcsd/.bundle/config
@@ -356,6 +358,9 @@ run_all_tests
 %doc COPYING README
 
 %changelog
+* Thu Mar  2 2017 Johnny Hughes <johnny@centos.org> - 0.9.152-10.el7.centos.3
+- Roll in CentOS Branding (centos bug #9426)
+
 * Tue Feb 14 2017  Ivan Devat <idevat@redhat.com> - 0.9.152-10.el7_3.3
 - Provide a better error message in `pcs cluster cib-push` when the diff of the old and the new CIB is empty
 - Resolves: rhbz#1420757
