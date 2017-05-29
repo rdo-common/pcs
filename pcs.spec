@@ -10,9 +10,9 @@ ExclusiveArch: i686 x86_64 s390x ppc64le
 
 #part after last slash is recognized as filename in look-aside repository
 #desired name is achived by trick with hash anchor
-Source0: %{url}/archive/%{version}.tar.gz#/%{name}-%{version}.tar.gz
-Source1: HAM-logo.png
-Source2: pcsd-bundle-config-1
+Source0: http://people.redhat.com/mbaldess/rpms/container-repo/sources/pcs/%{name}-%{version}.tar.gz
+Source1: http://people.redhat.com/mbaldess/rpms/container-repo/sources/pcs/HAM-logo.png
+Source2: http://people.redhat.com/mbaldess/rpms/container-repo/sources/pcs/pcsd-bundle-config-1
 
 Source11: https://rubygems.org/downloads/backports-3.6.8.gem
 Source12: https://rubygems.org/downloads/multi_json-1.12.1.gem
