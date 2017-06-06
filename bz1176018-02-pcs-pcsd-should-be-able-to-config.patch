@@ -1,0 +1,322 @@
+From b8b59f772b2bbdb9728b32c674e69df851f82397 Mon Sep 17 00:00:00 2001
+From: Ivan Devat <idevat@redhat.com>
+Date: Tue, 30 May 2017 16:56:50 +0200
+Subject: [PATCH] squash bz1176018 pcs/pcsd should be able to config
+
+43aeca1 fix --skip-offline without effect problem
+
+38de786 clean remote/guest node before pushing cib
+---
+ pcs/cli/cluster/command.py           | 15 +++++----
+ pcs/lib/commands/cluster.py          | 65 ++++++++++++++++++++----------------
+ pcs/lib/nodes_task.py                | 13 ++++++--
+ pcs/lib/test/test_nodes_task.py      |  4 ---
+ pcs/test/test_cluster_pcmk_remote.py | 16 +++++----
+ 5 files changed, 66 insertions(+), 47 deletions(-)
+
+diff --git a/pcs/cli/cluster/command.py b/pcs/cli/cluster/command.py
+index f725326..963bd8c 100644
+--- a/pcs/cli/cluster/command.py
++++ b/pcs/cli/cluster/command.py
+@@ -35,6 +35,7 @@ def node_add_remote(lib, arg_list, modifiers):
+ 
+     parts = parse_resource_create_args(rest_args)
+     force = modifiers["force"]
++    skip_offline = modifiers["skip_offline_nodes"]
+ 
+     lib.cluster.node_add_remote(
+         node_host,
+@@ -42,8 +43,8 @@ def node_add_remote(lib, arg_list, modifiers):
+         parts["op"],
+         parts["meta"],
+         parts["options"],
+-        allow_incomplete_distribution=force,
+-        allow_pacemaker_remote_service_fail=force,
++        allow_incomplete_distribution=skip_offline,
++        allow_pacemaker_remote_service_fail=skip_offline,
+         allow_invalid_operation=force,
+         allow_invalid_instance_attributes=force,
+         use_default_operations=not modifiers["no-default-ops"],
+@@ -58,7 +59,7 @@ def create_node_remove_remote(remove_resource):
+             arg_list[0],
+             remove_resource,
+             allow_remove_multiple_nodes=modifiers["force"],
+-            allow_pacemaker_remote_service_fail=modifiers["force"],
++            allow_pacemaker_remote_service_fail=modifiers["skip_offline_nodes"],
+         )
+     return node_remove_remote
+ 
+@@ -71,14 +72,14 @@ def node_add_guest(lib, arg_list, modifiers):
+     resource_id = arg_list[1]
+     meta_options = prepare_options(arg_list[2:])
+ 
+-    force = modifiers["force"]
++    skip_offline = modifiers["skip_offline_nodes"]
+ 
+     lib.cluster.node_add_guest(
+         node_name,
+         resource_id,
+         meta_options,
+-        allow_incomplete_distribution=force,
+-        allow_pacemaker_remote_service_fail=force,
++        allow_incomplete_distribution=skip_offline,
++        allow_pacemaker_remote_service_fail=skip_offline,
+         wait=modifiers["wait"],
+     )
+ 
+@@ -89,7 +90,7 @@ def node_remove_guest(lib, arg_list, modifiers):
+     lib.cluster.node_remove_guest(
+         arg_list[0],
+         allow_remove_multiple_nodes=modifiers["force"],
+-        allow_pacemaker_remote_service_fail=modifiers["force"],
++        allow_pacemaker_remote_service_fail=modifiers["skip_offline_nodes"],
+         wait=modifiers["wait"],
+     )
+ 
+diff --git a/pcs/lib/commands/cluster.py b/pcs/lib/commands/cluster.py
+index 0bafef5..fe883f3 100644
+--- a/pcs/lib/commands/cluster.py
++++ b/pcs/lib/commands/cluster.py
+@@ -21,13 +21,16 @@ from pcs.lib.errors import LibraryError
+ from pcs.lib.pacemaker import state
+ from pcs.lib.pacemaker.live import remove_node
+ 
+-def _ensure_can_add_node_to_remote_cluster(env, node_addresses):
++def _ensure_can_add_node_to_remote_cluster(
++    env, node_addresses, warn_on_communication_exception=False
++):
+     report_items = []
+     nodes_task.check_can_add_node_to_cluster(
+         env.node_communicator(),
+         node_addresses,
+         report_items,
+-        check_response=nodes_task.availability_checker_remote_node
++        check_response=nodes_task.availability_checker_remote_node,
++        warn_on_communication_exception=warn_on_communication_exception,
+     )
+     env.report_processor.process_list(report_items)
+ 
+@@ -88,7 +91,11 @@ def _prepare_pacemaker_remote_environment(
+         return
+ 
+     candidate_node = NodeAddresses(node_host)
+-    _ensure_can_add_node_to_remote_cluster(env, candidate_node)
++    _ensure_can_add_node_to_remote_cluster(
++        env,
++        candidate_node,
++        allow_incomplete_distribution
++    )
+     _share_authkey(
+         env,
+         current_nodes,
+@@ -296,17 +303,13 @@ def _find_resources_to_remove(
+ 
+     return resource_element_list
+ 
+-def _remove_pcmk_remote_from_cib(
+-    nodes, resource_element_list, get_host, remove_resource
+-):
++def _get_node_addresses_from_resources(nodes, resource_element_list, get_host):
+     node_addresses_set = set()
+     for resource_element in resource_element_list:
+         for node in nodes:
+             #remote nodes uses ring0 only
+             if get_host(resource_element) == node.ring0:
+                 node_addresses_set.add(node)
+-        remove_resource(resource_element)
+-
+     return sorted(node_addresses_set, key=lambda node: node.ring0)
+ 
+ def _destroy_pcmk_remote_env(env, node_addresses_list, allow_fails):
+@@ -382,28 +385,31 @@ def node_remove_remote(
+         allow_remove_multiple_nodes,
+         remote_node.find_node_resources,
+     )
+-    node_addresses_list = _remove_pcmk_remote_from_cib(
++
++    node_addresses_list = _get_node_addresses_from_resources(
+         get_nodes_remote(cib),
+         resource_element_list,
+         remote_node.get_host,
+-        lambda resource_element: remove_resource(
+-            resource_element.attrib["id"],
+-            is_remove_remote_context=True,
+-        )
+     )
++
+     if not env.is_corosync_conf_live:
+         env.report_processor.process_list(
+             _report_skip_live_parts_in_remove(node_addresses_list)
+         )
+-        return
++    else:
++        _destroy_pcmk_remote_env(
++            env,
++            node_addresses_list,
++            allow_pacemaker_remote_service_fail
++        )
+ 
+     #remove node from pcmk caches is currently integrated in remove_resource
+     #function
+-    _destroy_pcmk_remote_env(
+-        env,
+-        node_addresses_list,
+-        allow_pacemaker_remote_service_fail
+-    )
++    for resource_element in resource_element_list:
++        remove_resource(
++            resource_element.attrib["id"],
++            is_remove_remote_context=True,
++        )
+ 
+ def node_remove_guest(
+     env, node_identifier,
+@@ -435,29 +441,32 @@ def node_remove_guest(
+         guest_node.find_node_resources,
+     )
+ 
+-    node_addresses_list =  _remove_pcmk_remote_from_cib(
++    node_addresses_list = _get_node_addresses_from_resources(
+         get_nodes_guest(cib),
+         resource_element_list,
+         guest_node.get_host,
+-        guest_node.unset_guest,
+     )
+-    env.push_cib(cib, wait)
+ 
+     if not env.is_corosync_conf_live:
+         env.report_processor.process_list(
+             _report_skip_live_parts_in_remove(node_addresses_list)
+         )
+-        return
++    else:
++        _destroy_pcmk_remote_env(
++            env,
++            node_addresses_list,
++            allow_pacemaker_remote_service_fail
++        )
++
++    for resource_element in resource_element_list:
++        guest_node.unset_guest(resource_element)
++
++    env.push_cib(cib, wait)
+ 
+     #remove node from pcmk caches
+     for node_addresses in node_addresses_list:
+         remove_node(env.cmd_runner(), node_addresses.name)
+ 
+-    _destroy_pcmk_remote_env(
+-        env,
+-        node_addresses_list,
+-        allow_pacemaker_remote_service_fail
+-    )
+ 
+ def node_clear(env, node_name, allow_clear_cluster_node=False):
+     """
+diff --git a/pcs/lib/nodes_task.py b/pcs/lib/nodes_task.py
+index 703609b..6086c4b 100644
+--- a/pcs/lib/nodes_task.py
++++ b/pcs/lib/nodes_task.py
+@@ -277,7 +277,8 @@ def availability_checker_remote_node(
+ 
+ def check_can_add_node_to_cluster(
+     node_communicator, node, report_items,
+-    check_response=availability_checker_node
++    check_response=availability_checker_node,
++    warn_on_communication_exception=False,
+ ):
+     """
+     Analyze result of node_available check if it is possible use the node as
+@@ -294,13 +295,21 @@ def check_can_add_node_to_cluster(
+         node_communicator,
+         node,
+         "remote/node_available",
+-        safe_report_items
++        safe_report_items,
++        warn_on_communication_exception=warn_on_communication_exception
+     )
+     report_items.extend(safe_report_items)
+ 
+     if ReportListAnalyzer(safe_report_items).error_list:
+         return
+ 
++    #If there was a communication error and --skip-offline is in effect, no
++    #exception was raised. If there is no result cannot process it.
++    #Note: the error may be caused by older pcsd daemon not supporting commands
++    #sent by newer client.
++    if not availability_info:
++        return
++
+     is_in_expected_format = (
+         isinstance(availability_info, dict)
+         and
+diff --git a/pcs/lib/test/test_nodes_task.py b/pcs/lib/test/test_nodes_task.py
+index 61ba132..5459337 100644
+--- a/pcs/lib/test/test_nodes_task.py
++++ b/pcs/lib/test/test_nodes_task.py
+@@ -790,10 +790,6 @@ class CheckCanAddNodeToCluster(TestCase):
+     def test_report_no_dict_in_json_response(self):
+         self.assert_result_causes_invalid_format("bad answer")
+ 
+-    def test_report_dict_without_mandatory_key(self):
+-        self.assert_result_causes_invalid_format({})
+-
+-
+ class OnNodeTest(TestCase):
+     def setUp(self):
+         self.reporter = MockLibraryReportProcessor()
+diff --git a/pcs/test/test_cluster_pcmk_remote.py b/pcs/test/test_cluster_pcmk_remote.py
+index 5dc1633..0db4a5c 100644
+--- a/pcs/test/test_cluster_pcmk_remote.py
++++ b/pcs/test/test_cluster_pcmk_remote.py
+@@ -399,11 +399,11 @@ class NodeRemoveRemote(ResourceTest):
+         self.assert_effect(
+             "cluster node remove-remote NODE-HOST",
+             "<resources/>",
+-            outdent(
++            fixture_nolive_remove_report(["NODE-HOST"]) + outdent(
+                 """\
+                 Deleting Resource - NODE-NAME
+                 """
+-            ) + fixture_nolive_remove_report(["NODE-HOST"])
++            )
+         )
+ 
+     def test_success_remove_by_node_name(self):
+@@ -411,11 +411,11 @@ class NodeRemoveRemote(ResourceTest):
+         self.assert_effect(
+             "cluster node remove-remote NODE-NAME",
+             "<resources/>",
+-            outdent(
++            fixture_nolive_remove_report(["NODE-HOST"]) + outdent(
+                 """\
+                 Deleting Resource - NODE-NAME
+                 """
+-            ) + fixture_nolive_remove_report(["NODE-HOST"])
++            )
+         )
+ 
+     def test_refuse_on_duplicit(self):
+@@ -431,13 +431,17 @@ class NodeRemoveRemote(ResourceTest):
+         self.assert_effect(
+             "cluster node remove-remote HOST-A --force",
+             "<resources/>",
++
++            "Warning: multiple resource for 'HOST-A' found: 'HOST-A', 'NODE-NAME'\n"
++            +
++            fixture_nolive_remove_report(["HOST-A", "HOST-B"])
++            +
+             outdent(
+                 """\
+-                Warning: multiple resource for 'HOST-A' found: 'HOST-A', 'NODE-NAME'
+                 Deleting Resource - NODE-NAME
+                 Deleting Resource - HOST-A
+                 """
+-            ) + fixture_nolive_remove_report(["HOST-A", "HOST-B"])
++            )
+         )
+ 
+ class NodeRemoveGuest(ResourceTest):
+-- 
+1.8.3.1
+

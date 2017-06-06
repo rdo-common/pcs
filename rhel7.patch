@@ -1,4 +1,4 @@
-From fea09dbacdf536e5801769e07113bcd9eb7250f1 Mon Sep 17 00:00:00 2001
+From 7a1331d7ace7890e24fee411f52dfc0ca77f8905 Mon Sep 17 00:00:00 2001
 From: Ivan Devat <idevat@redhat.com>
 Date: Tue, 24 May 2016 07:26:15 +0200
 Subject: [PATCH] adapt working with gems to rhel 7

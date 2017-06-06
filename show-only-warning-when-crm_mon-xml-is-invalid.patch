@@ -1,4 +1,4 @@
-From 64539e5825eb0041a9c5b097471b689a48d7d4de Mon Sep 17 00:00:00 2001
+From 041fd270207c468274a15e0cea7be04db9d0e3ed Mon Sep 17 00:00:00 2001
 From: Ivan Devat <idevat@redhat.com>
 Date: Mon, 29 Aug 2016 18:16:41 +0200
 Subject: [PATCH] show only warning when crm_mon xml is invalid
@@ -9,7 +9,7 @@ Subject: [PATCH] show only warning when crm_mon xml is invalid
  2 files changed, 30 insertions(+), 7 deletions(-)
 
 diff --git a/pcs/lib/pacemaker/state.py b/pcs/lib/pacemaker/state.py
-index 71809db..df6e320 100644
+index 2f51968..79e1be7 100644
 --- a/pcs/lib/pacemaker/state.py
 +++ b/pcs/lib/pacemaker/state.py
 @@ -145,10 +145,17 @@ class _NodeSection(_Element):
@@ -34,7 +34,7 @@ index 71809db..df6e320 100644
  
  class ClusterState(_Element):
 diff --git a/pcs/lib/pacemaker/test/test_state.py b/pcs/lib/pacemaker/test/test_state.py
-index a29eddf..ce153b7 100644
+index 200b0ea..7a7c072 100644
 --- a/pcs/lib/pacemaker/test/test_state.py
 +++ b/pcs/lib/pacemaker/test/test_state.py
 @@ -5,6 +5,14 @@ from __future__ import (

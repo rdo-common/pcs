@@ -1,0 +1,647 @@
+From becaebffd4c547167d0ac4178afae9019dc522cc Mon Sep 17 00:00:00 2001
+From: Tomas Jelinek <tojeline@redhat.com>
+Date: Mon, 5 Jun 2017 17:12:23 +0200
+Subject: [PATCH] squash bz1433016  Improved container support req.
+
+make resource enable | disable work with bundles
+
+show bundles' meta attributes in resources listing
+---
+ pcs/lib/cib/resource/common.py                     |  10 +-
+ pcs/lib/cib/test/test_resource_common.py           |   6 +-
+ pcs/lib/commands/resource.py                       |  16 ++-
+ pcs/lib/commands/test/resource/fixture.py          |  13 +++
+ .../test/resource/test_resource_enable_disable.py  | 113 ++++++++++++++++-----
+ pcs/lib/pacemaker/state.py                         |  21 ++--
+ pcs/lib/pacemaker/test/test_state.py               |  75 ++++++++++++++
+ pcs/resource.py                                    |   1 +
+ pcs/test/cib_resource/test_bundle.py               |  42 ++++++++
+ pcs/test/test_resource.py                          |  18 ++--
+ 10 files changed, 259 insertions(+), 56 deletions(-)
+
+diff --git a/pcs/lib/cib/resource/common.py b/pcs/lib/cib/resource/common.py
+index f9028ff..acd6c81 100644
+--- a/pcs/lib/cib/resource/common.py
++++ b/pcs/lib/cib/resource/common.py
+@@ -58,16 +58,18 @@ def find_resources_to_enable(resource_el):
+     etree resource_el -- resource element
+     """
+     if is_bundle(resource_el):
+-        # bundles currently cannot be disabled - pcmk does not support that
+-        # inner resources are supposed to be managed separately
+-        return []
++        to_enable = [resource_el]
++        in_bundle = get_bundle_inner_resource(resource_el)
++        if in_bundle is not None:
++            to_enable.append(in_bundle)
++        return to_enable
+ 
+     if is_any_clone(resource_el):
+         return [resource_el, get_clone_inner_resource(resource_el)]
+ 
+     to_enable = [resource_el]
+     parent = resource_el.getparent()
+-    if is_any_clone(parent):
++    if is_any_clone(parent) or is_bundle(parent):
+         to_enable.append(parent)
+     return to_enable
+ 
+diff --git a/pcs/lib/cib/test/test_resource_common.py b/pcs/lib/cib/test/test_resource_common.py
+index 52c2329..3daead2 100644
+--- a/pcs/lib/cib/test/test_resource_common.py
++++ b/pcs/lib/cib/test/test_resource_common.py
+@@ -180,7 +180,7 @@ class FindResourcesToEnable(TestCase):
+         self.assert_find_resources("F2", ["F2"])
+ 
+     def test_primitive_in_bundle(self):
+-        self.assert_find_resources("H", ["H"])
++        self.assert_find_resources("H", ["H", "H-bundle"])
+ 
+     def test_group(self):
+         self.assert_find_resources("D", ["D"])
+@@ -204,10 +204,10 @@ class FindResourcesToEnable(TestCase):
+         self.assert_find_resources("F-master", ["F-master", "F"])
+ 
+     def test_bundle_empty(self):
+-        self.assert_find_resources("G-bundle", [])
++        self.assert_find_resources("G-bundle", ["G-bundle"])
+ 
+     def test_bundle_with_primitive(self):
+-        self.assert_find_resources("H-bundle", [])
++        self.assert_find_resources("H-bundle", ["H-bundle", "H"])
+ 
+ 
+ class Enable(TestCase):
+diff --git a/pcs/lib/commands/resource.py b/pcs/lib/commands/resource.py
+index 3a060b8..e791f2c 100644
+--- a/pcs/lib/commands/resource.py
++++ b/pcs/lib/commands/resource.py
+@@ -597,7 +597,8 @@ def disable(env, resource_ids, wait):
+     ) as resources_section:
+         resource_el_list = _find_resources_or_raise(
+             resources_section,
+-            resource_ids
++            resource_ids,
++            bundle=True
+         )
+         env.report_processor.process_list(
+             _resource_list_enable_disable(
+@@ -620,7 +621,8 @@ def enable(env, resource_ids, wait):
+         resource_el_list = _find_resources_or_raise(
+             resources_section,
+             resource_ids,
+-            resource.common.find_resources_to_enable
++            resource.common.find_resources_to_enable,
++            bundle=True
+         )
+         env.report_processor.process_list(
+             _resource_list_enable_disable(
+@@ -642,7 +644,7 @@ def _resource_list_enable_disable(resource_el_list, func, cluster_state):
+             report_list.append(
+                 reports.id_not_found(
+                     res_id,
+-                    id_description="resource/clone/master/group"
++                    id_description="resource/clone/master/group/bundle"
+                )
+             )
+     return report_list
+@@ -726,7 +728,7 @@ def manage(env, resource_ids, with_monitor=False):
+         env.report_processor.process_list(report_list)
+ 
+ def _find_resources_or_raise(
+-    resources_section, resource_ids, additional_search=None
++    resources_section, resource_ids, additional_search=None, bundle=False
+ ):
+     if not additional_search:
+         additional_search = lambda x: [x]
+@@ -737,6 +739,10 @@ def _find_resources_or_raise(
+         +
+         [resource.group.TAG, resource.primitive.TAG]
+     )
++    id_description="resource/clone/master/group"
++    if bundle:
++        resource_tags.append(resource.bundle.TAG)
++        id_description="resource/clone/master/group/bundle"
+     for res_id in resource_ids:
+         try:
+             resource_el_list.extend(
+@@ -745,7 +751,7 @@ def _find_resources_or_raise(
+                         resource_tags,
+                         resources_section,
+                         res_id,
+-                        id_description="resource/clone/master/group"
++                        id_description=id_description
+                     )
+                 )
+             )
+diff --git a/pcs/lib/commands/test/resource/fixture.py b/pcs/lib/commands/test/resource/fixture.py
+index f1fe09b..5634270 100644
+--- a/pcs/lib/commands/test/resource/fixture.py
++++ b/pcs/lib/commands/test/resource/fixture.py
+@@ -150,6 +150,19 @@ def report_not_found(res_id, context_type=""):
+         None
+     )
+ 
++def report_not_found_bundle(res_id, context_type=""):
++    return (
++        severities.ERROR,
++        report_codes.ID_NOT_FOUND,
++        {
++            "context_type": context_type,
++            "context_id": "",
++            "id": res_id,
++            "id_description": "resource/clone/master/group/bundle",
++        },
++        None
++    )
++
+ def report_resource_not_running(resource, severity=severities.INFO):
+     return (
+         severity,
+diff --git a/pcs/lib/commands/test/resource/test_resource_enable_disable.py b/pcs/lib/commands/test/resource/test_resource_enable_disable.py
+index 91ac068..5928bc4 100644
+--- a/pcs/lib/commands/test/resource/test_resource_enable_disable.py
++++ b/pcs/lib/commands/test/resource/test_resource_enable_disable.py
+@@ -469,6 +469,35 @@ fixture_bundle_cib_disabled_primitive = """
+         </bundle>
+     </resources>
+ """
++fixture_bundle_cib_disabled_bundle = """
++    <resources>
++        <bundle id="A-bundle">
++            <meta_attributes id="A-bundle-meta_attributes">
++                <nvpair id="A-bundle-meta_attributes-target-role"
++                    name="target-role" value="Stopped" />
++            </meta_attributes>
++            <docker image="pcs:test" />
++            <primitive id="A" class="ocf" provider="heartbeat" type="Dummy" />
++        </bundle>
++    </resources>
++"""
++fixture_bundle_cib_disabled_both = """
++    <resources>
++        <bundle id="A-bundle">
++            <meta_attributes id="A-bundle-meta_attributes">
++                <nvpair id="A-bundle-meta_attributes-target-role"
++                    name="target-role" value="Stopped" />
++            </meta_attributes>
++            <docker image="pcs:test" />
++            <primitive id="A" class="ocf" provider="heartbeat" type="Dummy">
++                <meta_attributes id="A-meta_attributes">
++                    <nvpair id="A-meta_attributes-target-role"
++                        name="target-role" value="Stopped" />
++                </meta_attributes>
++            </primitive>
++        </bundle>
++    </resources>
++"""
+ fixture_bundle_status_managed = """
+     <resources>
+         <bundle id="A-bundle" type="docker" image="pcmktest:http"
+@@ -486,7 +515,7 @@ fixture_bundle_status_managed = """
+ fixture_bundle_status_unmanaged = """
+     <resources>
+         <bundle id="A-bundle" type="docker" image="pcmktest:http"
+-            unique="false" managed="true" failed="false"
++            unique="false" managed="false" failed="false"
+         >
+             <replica id="0">
+                 <resource id="A" managed="false" />
+@@ -519,7 +548,7 @@ class DisablePrimitive(ResourceWithStateTest):
+ 
+         assert_raise_library_error(
+             lambda: resource.disable(self.env, ["B"], False),
+-            fixture.report_not_found("B", "resources")
++            fixture.report_not_found_bundle("B", "resources")
+         )
+         self.runner.assert_everything_launched()
+ 
+@@ -536,7 +565,7 @@ class DisablePrimitive(ResourceWithStateTest):
+ 
+         assert_raise_library_error(
+             lambda: resource.disable(self.env, ["B"], False),
+-            fixture.report_not_found("B")
++            fixture.report_not_found_bundle("B")
+         )
+         self.runner.assert_everything_launched()
+ 
+@@ -573,7 +602,7 @@ class EnablePrimitive(ResourceWithStateTest):
+ 
+         assert_raise_library_error(
+             lambda: resource.enable(self.env, ["B"], False),
+-            fixture.report_not_found("B", "resources")
++            fixture.report_not_found_bundle("B", "resources")
+         )
+         self.runner.assert_everything_launched()
+ 
+@@ -590,7 +619,7 @@ class EnablePrimitive(ResourceWithStateTest):
+ 
+         assert_raise_library_error(
+             lambda: resource.enable(self.env, ["B"], False),
+-            fixture.report_not_found("B")
++            fixture.report_not_found_bundle("B")
+         )
+         self.runner.assert_everything_launched()
+ 
+@@ -739,8 +768,8 @@ class MoreResources(ResourceWithStateTest):
+ 
+         assert_raise_library_error(
+             lambda: resource.enable(self.env, ["B", "X", "Y", "A"], False),
+-            fixture.report_not_found("X", "resources"),
+-            fixture.report_not_found("Y", "resources"),
++            fixture.report_not_found_bundle("X", "resources"),
++            fixture.report_not_found_bundle("Y", "resources"),
+         )
+         self.runner.assert_everything_launched()
+ 
+@@ -753,8 +782,8 @@ class MoreResources(ResourceWithStateTest):
+ 
+         assert_raise_library_error(
+             lambda: resource.disable(self.env, ["B", "X", "Y", "A"], False),
+-            fixture.report_not_found("X", "resources"),
+-            fixture.report_not_found("Y", "resources"),
++            fixture.report_not_found_bundle("X", "resources"),
++            fixture.report_not_found_bundle("Y", "resources"),
+         )
+         self.runner.assert_everything_launched()
+ 
+@@ -805,7 +834,7 @@ class Wait(ResourceWithStateTest):
+ 
+         assert_raise_library_error(
+             lambda: resource.enable(self.env, ["B"], 10),
+-            fixture.report_not_found("B", "resources"),
++            fixture.report_not_found_bundle("B", "resources"),
+         )
+         self.runner.assert_everything_launched()
+ 
+@@ -820,7 +849,7 @@ class Wait(ResourceWithStateTest):
+ 
+         assert_raise_library_error(
+             lambda: resource.disable(self.env, ["B"], 10),
+-            fixture.report_not_found("B", "resources"),
++            fixture.report_not_found_bundle("B", "resources"),
+         )
+         self.runner.assert_everything_launched()
+ 
+@@ -1460,17 +1489,12 @@ class DisableBundle(ResourceWithStateTest):
+         )
+ 
+     def test_bundle(self):
+-        self.runner.set_runs(
+-            fixture.call_cib_load(
+-                fixture.cib_resources(fixture_bundle_cib_enabled)
+-            )
+-        )
+-
+-        assert_raise_library_error(
++        self.assert_command_effect(
++            fixture_bundle_cib_enabled,
++            fixture_bundle_status_managed,
+             lambda: resource.disable(self.env, ["A-bundle"], False),
+-            fixture.report_not_for_bundles("A-bundle")
++            fixture_bundle_cib_disabled_bundle
+         )
+-        self.runner.assert_everything_launched()
+ 
+     def test_primitive_unmanaged(self):
+         self.assert_command_effect(
+@@ -1483,6 +1507,17 @@ class DisableBundle(ResourceWithStateTest):
+             ]
+         )
+ 
++    def test_bundle_unmanaged(self):
++        self.assert_command_effect(
++            fixture_bundle_cib_enabled,
++            fixture_bundle_status_unmanaged,
++            lambda: resource.disable(self.env, ["A-bundle"], False),
++            fixture_bundle_cib_disabled_bundle,
++            reports=[
++                fixture_report_unmanaged("A-bundle"),
++            ]
++        )
++
+ 
+ @skip_unless_pacemaker_supports_bundle
+ class EnableBundle(ResourceWithStateTest):
+@@ -1494,18 +1529,29 @@ class EnableBundle(ResourceWithStateTest):
+             fixture_bundle_cib_enabled
+         )
+ 
++    def test_primitive_disabled_both(self):
++        self.assert_command_effect(
++            fixture_bundle_cib_disabled_both,
++            fixture_bundle_status_managed,
++            lambda: resource.enable(self.env, ["A"], False),
++            fixture_bundle_cib_enabled
++        )
++
+     def test_bundle(self):
+-        self.runner.set_runs(
+-            fixture.call_cib_load(
+-                fixture.cib_resources(fixture_bundle_cib_enabled)
+-            )
++        self.assert_command_effect(
++            fixture_bundle_cib_disabled_bundle,
++            fixture_bundle_status_managed,
++            lambda: resource.enable(self.env, ["A-bundle"], False),
++            fixture_bundle_cib_enabled
+         )
+ 
+-        assert_raise_library_error(
++    def test_bundle_disabled_both(self):
++        self.assert_command_effect(
++            fixture_bundle_cib_disabled_both,
++            fixture_bundle_status_managed,
+             lambda: resource.enable(self.env, ["A-bundle"], False),
+-            fixture.report_not_for_bundles("A-bundle")
++            fixture_bundle_cib_enabled
+         )
+-        self.runner.assert_everything_launched()
+ 
+     def test_primitive_unmanaged(self):
+         self.assert_command_effect(
+@@ -1515,5 +1561,18 @@ class EnableBundle(ResourceWithStateTest):
+             fixture_bundle_cib_enabled,
+             reports=[
+                 fixture_report_unmanaged("A"),
++                fixture_report_unmanaged("A-bundle"),
++            ]
++        )
++
++    def test_bundle_unmanaged(self):
++        self.assert_command_effect(
++            fixture_bundle_cib_disabled_primitive,
++            fixture_bundle_status_unmanaged,
++            lambda: resource.enable(self.env, ["A-bundle"], False),
++            fixture_bundle_cib_enabled,
++            reports=[
++                fixture_report_unmanaged("A-bundle"),
++                fixture_report_unmanaged("A"),
+             ]
+         )
+diff --git a/pcs/lib/pacemaker/state.py b/pcs/lib/pacemaker/state.py
+index 71809db..2f51968 100644
+--- a/pcs/lib/pacemaker/state.py
++++ b/pcs/lib/pacemaker/state.py
+@@ -244,18 +244,25 @@ def is_resource_managed(cluster_state, resource_id):
+         for primitive in primitive_list:
+             if is_false(primitive.attrib.get("managed", "")):
+                 return False
+-            clone = find_parent(primitive, ["clone"])
+-            if clone is not None and is_false(clone.attrib.get("managed", "")):
++            parent = find_parent(primitive, ["clone", "bundle"])
++            if (
++                parent is not None
++                and
++                is_false(parent.attrib.get("managed", ""))
++            ):
+                 return False
+         return True
+ 
+-    clone_list = cluster_state.xpath(
+-        """.//clone[@id="{0}"]""".format(resource_id)
++    parent_list = cluster_state.xpath("""
++        .//clone[@id="{0}"]
++        |
++        .//bundle[@id="{0}"]
++        """.format(resource_id)
+     )
+-    for clone in clone_list:
+-        if is_false(clone.attrib.get("managed", "")):
++    for parent in parent_list:
++        if is_false(parent.attrib.get("managed", "")):
+             return False
+-        for primitive in clone.xpath(".//resource"):
++        for primitive in parent.xpath(".//resource"):
+             if is_false(primitive.attrib.get("managed", "")):
+                 return False
+         return True
+diff --git a/pcs/lib/pacemaker/test/test_state.py b/pcs/lib/pacemaker/test/test_state.py
+index a29eddf..200b0ea 100644
+--- a/pcs/lib/pacemaker/test/test_state.py
++++ b/pcs/lib/pacemaker/test/test_state.py
+@@ -733,6 +733,60 @@ class IsResourceManaged(TestCase):
+                     <resource id="R38:1" managed="false" />
+                 </group>
+             </clone>
++
++            <bundle id="B1" managed="true" />
++            <bundle id="B2" managed="false" />
++
++            <bundle id="B3" managed="true">
++                <replica id="0">
++                    <resource id="R39" managed="true" />
++                    <resource id="R40" managed="true" />
++                </replica>
++                <replica id="1">
++                    <resource id="R39" managed="true" />
++                    <resource id="R40" managed="true" />
++                </replica>
++            </bundle>
++            <bundle id="B4" managed="false">
++                <replica id="0">
++                    <resource id="R41" managed="true" />
++                    <resource id="R42" managed="true" />
++                </replica>
++                <replica id="1">
++                    <resource id="R41" managed="true" />
++                    <resource id="R42" managed="true" />
++                </replica>
++            </bundle>
++            <bundle id="B5" managed="true">
++                <replica id="0">
++                    <resource id="R43" managed="false" />
++                    <resource id="R44" managed="true" />
++                </replica>
++                <replica id="1">
++                    <resource id="R43" managed="false" />
++                    <resource id="R44" managed="true" />
++                </replica>
++            </bundle>
++            <bundle id="B6" managed="true">
++                <replica id="0">
++                    <resource id="R45" managed="true" />
++                    <resource id="R46" managed="false" />
++                </replica>
++                <replica id="1">
++                    <resource id="R45" managed="true" />
++                    <resource id="R46" managed="false" />
++                </replica>
++            </bundle>
++            <bundle id="B7" managed="false">
++                <replica id="0">
++                    <resource id="R47" managed="false" />
++                    <resource id="R48" managed="false" />
++                </replica>
++                <replica id="1">
++                    <resource id="R47" managed="false" />
++                    <resource id="R48" managed="false" />
++                </replica>
++            </bundle>
+         </resources>
+     """)
+ 
+@@ -856,3 +910,24 @@ class IsResourceManaged(TestCase):
+         self.assert_managed("R36", False)
+         self.assert_managed("R37", False)
+         self.assert_managed("R38", False)
++
++    def test_bundle(self):
++        self.assert_managed("B1", True)
++        self.assert_managed("B2", False)
++        self.assert_managed("B3", True)
++        self.assert_managed("B4", False)
++        self.assert_managed("B5", False)
++        self.assert_managed("B6", False)
++        self.assert_managed("B7", False)
++
++    def test_primitive_in_bundle(self):
++        self.assert_managed("R39", True)
++        self.assert_managed("R40", True)
++        self.assert_managed("R41", False)
++        self.assert_managed("R42", False)
++        self.assert_managed("R43", False)
++        self.assert_managed("R44", True)
++        self.assert_managed("R45", True)
++        self.assert_managed("R46", False)
++        self.assert_managed("R47", False)
++        self.assert_managed("R48", False)
+diff --git a/pcs/resource.py b/pcs/resource.py
+index dc6da13..445cf42 100644
+--- a/pcs/resource.py
++++ b/pcs/resource.py
+@@ -2246,6 +2246,7 @@ def print_node(node, tab = 0):
+             node.findall("storage/storage-mapping"),
+             spaces + " "
+         )
++        print_meta_vars_string(node, spaces)
+         for child in node:
+             print_node(child, tab + 1)
+         return
+diff --git a/pcs/test/cib_resource/test_bundle.py b/pcs/test/cib_resource/test_bundle.py
+index d8c97c6..18efef7 100644
+--- a/pcs/test/cib_resource/test_bundle.py
++++ b/pcs/test/cib_resource/test_bundle.py
+@@ -463,6 +463,38 @@ class BundleShow(TestCase, AssertPcsMixin):
+             """
+         ))
+ 
++    def test_meta(self):
++        self.assert_pcs_success(
++            "resource bundle create B1 container image=pcs:test"
++        )
++        self.assert_pcs_success(
++            "resource disable B1"
++        )
++        self.assert_pcs_success("resource show B1", outdent(
++            # pylint:disable=trailing-whitespace
++            """\
++             Bundle: B1
++              Docker: image=pcs:test
++              Meta Attrs: target-role=Stopped 
++            """
++        ))
++
++    def test_resource(self):
++        self.assert_pcs_success(
++            "resource bundle create B1 container image=pcs:test"
++        )
++        self.assert_pcs_success(
++            "resource create A ocf:pacemaker:Dummy bundle B1 --no-default-ops"
++        )
++        self.assert_pcs_success("resource show B1", outdent(
++            """\
++             Bundle: B1
++              Docker: image=pcs:test
++              Resource: A (class=ocf provider=pacemaker type=Dummy)
++               Operations: monitor interval=10 timeout=20 (A-monitor-interval-10)
++            """
++        ))
++
+     def test_all(self):
+         self.assert_pcs_success(
+             """
+@@ -476,7 +508,14 @@ class BundleShow(TestCase, AssertPcsMixin):
+                     target-dir=/tmp/docker2b
+             """
+         )
++        self.assert_pcs_success(
++            "resource disable B1"
++        )
++        self.assert_pcs_success(
++            "resource create A ocf:pacemaker:Dummy bundle B1 --no-default-ops"
++        )
+         self.assert_pcs_success("resource show B1", outdent(
++            # pylint:disable=trailing-whitespace
+             """\
+              Bundle: B1
+               Docker: image=pcs:test masters=2 options="a b c" replicas=4
+@@ -487,5 +526,8 @@ class BundleShow(TestCase, AssertPcsMixin):
+               Storage Mapping:
+                source-dir=/tmp/docker1a target-dir=/tmp/docker1b (B1-storage-map)
+                source-dir=/tmp/docker2a target-dir=/tmp/docker2b (my-storage-map)
++              Meta Attrs: target-role=Stopped 
++              Resource: A (class=ocf provider=pacemaker type=Dummy)
++               Operations: monitor interval=10 timeout=20 (A-monitor-interval-10)
+             """
+         ))
+diff --git a/pcs/test/test_resource.py b/pcs/test/test_resource.py
+index 96eae8f..bd4d2c9 100644
+--- a/pcs/test/test_resource.py
++++ b/pcs/test/test_resource.py
+@@ -3321,11 +3321,11 @@ Error: Cannot remove more than one resource from cloned group
+ 
+         # bad resource name
+         o,r = pcs(temp_cib, "resource enable NoExist")
+-        ac(o,"Error: resource/clone/master/group 'NoExist' does not exist\n")
++        ac(o,"Error: resource/clone/master/group/bundle 'NoExist' does not exist\n")
+         assert r == 1
+ 
+         o,r = pcs(temp_cib, "resource disable NoExist")
+-        ac(o,"Error: resource/clone/master/group 'NoExist' does not exist\n")
++        ac(o,"Error: resource/clone/master/group/bundle 'NoExist' does not exist\n")
+         assert r == 1
+ 
+         # cloned group
+@@ -3829,7 +3829,7 @@ Error: Cannot remove more than one resource from cloned group
+ 
+         self.assert_pcs_fail_regardless_of_force(
+             "resource enable dummy3 dummyX",
+-            "Error: resource/clone/master/group 'dummyX' does not exist\n"
++            "Error: resource/clone/master/group/bundle 'dummyX' does not exist\n"
+         )
+         self.assert_pcs_success(
+             "resource show --full",
+@@ -3849,7 +3849,7 @@ Error: Cannot remove more than one resource from cloned group
+ 
+         self.assert_pcs_fail_regardless_of_force(
+             "resource disable dummy1 dummyX",
+-            "Error: resource/clone/master/group 'dummyX' does not exist\n"
++            "Error: resource/clone/master/group/bundle 'dummyX' does not exist\n"
+         )
+         self.assert_pcs_success(
+             "resource show --full",
+@@ -4823,16 +4823,14 @@ class BundleCloneMaster(BundleCommon):
+ class BundleMiscCommands(BundleCommon):
+     def test_resource_enable_bundle(self):
+         self.fixture_bundle("B")
+-        self.assert_pcs_fail_regardless_of_force(
+-            "resource enable B",
+-            "Error: 'B' is not clone/master/a group/primitive\n"
++        self.assert_pcs_success(
++            "resource enable B"
+         )
+ 
+     def test_resource_disable_bundle(self):
+         self.fixture_bundle("B")
+-        self.assert_pcs_fail_regardless_of_force(
+-            "resource disable B",
+-            "Error: 'B' is not clone/master/a group/primitive\n"
++        self.assert_pcs_success(
++            "resource disable B"
+         )
+ 
+     def test_resource_manage_bundle(self):
+-- 
+1.8.3.1
+

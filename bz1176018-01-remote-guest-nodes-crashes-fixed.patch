@@ -1,0 +1,104 @@
+From e13624ef5b2171516979827dcbe7ff03eb8247e5 Mon Sep 17 00:00:00 2001
+From: Tomas Jelinek <tojeline@redhat.com>
+Date: Wed, 31 May 2017 07:39:23 +0200
+Subject: [PATCH] squash 1176018 remote guest nodes crashes fixed
+
+c7a24e6 fix adding a node to a stopped cluster
+
+88ad6e6 fix 'pcs cluster restore' command for pcmk authkey
+
+e4b768c fix crash of 'pcs cluster destroy --all'
+
+6b15785 fix crash of 'pcs cluster setup --force'
+---
+ pcs/cluster.py | 33 +++++++++++++++++++++++++--------
+ pcs/config.py  |  4 ++--
+ 2 files changed, 27 insertions(+), 10 deletions(-)
+
+diff --git a/pcs/cluster.py b/pcs/cluster.py
+index d64194d..b47db4a 100644
+--- a/pcs/cluster.py
++++ b/pcs/cluster.py
+@@ -425,9 +425,9 @@ def cluster_setup(argv):
+     else:
+         # verify and ensure no cluster is set up on the nodes
+         # checks that nodes are authenticated as well
++        lib_env = utils.get_lib_env()
+         if "--force" not in utils.pcs_options:
+             all_nodes_available = True
+-            lib_env = utils.get_lib_env()
+             for node in primary_addr_list:
+                 available, message = utils.canAddNodeToCluster(
+                     lib_env.node_communicator(),
+@@ -1757,9 +1757,12 @@ def node_add(lib_env, node0, node1, modifiers):
+                 NodeAddressesList([node_addr]),
+             )
+ 
++        # do not send pcmk authkey to guest and remote nodes, they either have
++        # it or are not working anyway
++        # if the cluster is stopped, we cannot get the cib anyway
+         _share_authkey(
+             lib_env,
+-            get_nodes(lib_env.get_corosync_conf(), lib_env.get_cib()),
++            get_nodes(lib_env.get_corosync_conf()),
+             node_addr,
+             allow_incomplete_distribution=modifiers["skip_offline_nodes"]
+         )
+@@ -2112,15 +2115,29 @@ def cluster_reload(argv):
+ # Code taken from cluster-clean script in pacemaker
+ def cluster_destroy(argv):
+     if "--all" in utils.pcs_options:
++        # destroy remote and guest nodes
++        cib = None
+         lib_env = utils.get_lib_env()
+-        all_remote_nodes = get_nodes(tree=lib_env.get_cib())
+-        if len(all_remote_nodes) > 0:
+-            _destroy_pcmk_remote_env(
+-                lib_env,
+-                all_remote_nodes,
+-                allow_fails=True
++        try:
++            cib = lib_env.get_cib()
++        except LibraryError as e:
++            warn(
++                "Unable to load CIB to get guest and remote nodes from it, "
++                "those nodes will not be deconfigured."
+             )
++        if cib is not None:
++            try:
++                all_remote_nodes = get_nodes(tree=cib)
++                if len(all_remote_nodes) > 0:
++                    _destroy_pcmk_remote_env(
++                        lib_env,
++                        all_remote_nodes,
++                        allow_fails=True
++                    )
++            except LibraryError as e:
++                utils.process_library_reports(e.args)
+ 
++        # destroy full-stack nodes
+         destroy_cluster(utils.getNodesFromCorosyncConf())
+     else:
+         print("Shutting down pacemaker/corosync services...")
+diff --git a/pcs/config.py b/pcs/config.py
+index 94191e1..5526eb5 100644
+--- a/pcs/config.py
++++ b/pcs/config.py
+@@ -446,12 +446,12 @@ def config_backup_path_list(with_uid_gid=False, force_rhel6=None):
+         "uname": settings.pacemaker_uname,
+         "gname": settings.pacemaker_gname,
+     }
+-    pcmk_authkey_attrs = dict(cib_attrs)
+-    pcmk_authkey_attrs["mode"] = 0o440
+     if with_uid_gid:
+         cib_attrs["uid"] = _get_uid(cib_attrs["uname"])
+         cib_attrs["gid"] = _get_gid(cib_attrs["gname"])
+ 
++    pcmk_authkey_attrs = dict(cib_attrs)
++    pcmk_authkey_attrs["mode"] = 0o440
+     file_list = {
+         "cib.xml": {
+             "path": os.path.join(settings.cib_dir, "cib.xml"),
+-- 
+1.8.3.1
+

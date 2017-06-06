@@ -1,6 +1,6 @@
 Name: pcs
 Version: 0.9.158
-Release: 1%{?dist}
+Release: 4%{?dist}
 License: GPLv2
 URL: https://github.com/ClusterLabs/pcs
 Group: System Environment/Base
@@ -30,9 +30,21 @@ Source23: https://rubygems.org/downloads/ffi-1.9.17.gem
 
 Source31: https://github.com/testing-cabal/mock/archive/1.0.1.tar.gz#/mock-1.0.1.tar.gz
 
-Patch0: rhel7.patch
-Patch1: change-cman-to-rhel6-in-messages.patch
-Patch2: show-only-warning-when-crm_mon-xml-is-invalid.patch
+Patch0: bz1176018-01-remote-guest-nodes-crashes-fixed.patch
+Patch1: bz1373614-01-return-1-when-pcsd-is-unable-to-bind.patch
+Patch2: bz1386114-01-fix-a-crash-in-adding-a-remote-node.patch
+Patch3: bz1284404-01-web-UI-fix-creating-a-new-cluster.patch
+Patch4: bz1165821-01-pcs-CLI-GUI-should-be-capable-of.patch
+Patch5: bz1176018-02-pcs-pcsd-should-be-able-to-config.patch
+Patch6: bz1386114-02-deal-with-f-corosync_conf-if-create-remote-res.patch
+Patch7: bz1176018-03-don-t-call-remove-guest-node-when-f-is-used.patch
+Patch8: bz1165821-02-pcs-CLI-GUI-should-be-capable-of.patch
+Patch9: bz1433016-01-Improved-container-support-req.patch
+Patch10: bz1458153-01-give-back-orig.-master-behav.-resource-create.patch
+
+Patch100: rhel7.patch
+Patch101: change-cman-to-rhel6-in-messages.patch
+Patch102: show-only-warning-when-crm_mon-xml-is-invalid.patch
 
 # git for patches
 BuildRequires: git
@@ -133,6 +145,17 @@ UpdateTimestamps() {
 UpdateTimestamps -p1 %{PATCH0}
 UpdateTimestamps -p1 %{PATCH1}
 UpdateTimestamps -p1 %{PATCH2}
+UpdateTimestamps -p1 %{PATCH3}
+UpdateTimestamps -p1 %{PATCH4}
+UpdateTimestamps -p1 %{PATCH5}
+UpdateTimestamps -p1 %{PATCH6}
+UpdateTimestamps -p1 %{PATCH7}
+UpdateTimestamps -p1 %{PATCH8}
+UpdateTimestamps -p1 %{PATCH9}
+UpdateTimestamps -p1 %{PATCH10}
+UpdateTimestamps -p1 %{PATCH100}
+UpdateTimestamps -p1 %{PATCH101}
+UpdateTimestamps -p1 %{PATCH102}
 
 cp -f %SOURCE1 pcsd/public/images
 
@@ -179,7 +202,7 @@ rm -r -v $RPM_BUILD_ROOT%{PCS_PREFIX}/lib/pcsd/vendor/cache
 
 %check
 run_all_tests(){
-  #prepare environmet for tests
+  #prepare environment for tests
   sitelib=$RPM_BUILD_ROOT%{python_sitelib}
   pcsd_dir=$RPM_BUILD_ROOT%{PCS_PREFIX}/lib/pcsd
 
@@ -296,6 +319,30 @@ run_all_tests
 %doc CHANGELOG.md
 
 %changelog
+* Tue Jun 06 2017 Ivan Devat <idevat@redhat.com> - 0.9.158-4
+- Added support for enable and disable in bundles
+- New clusters are created with corosync encryption disabled by default
+- Flag `--master` is backward compatible in `pcs resource create`
+- Resolves: rhbz#1165821 rhbz#1433016 rhbz#1458153
+
+* Wed May 31 2017 Ivan Devat <idevat@redhat.com> - 0.9.158-3
+- Added option to create not hardened cluster with the `pcs cluster setup` command using the `--no-hardened` flag
+- Added option to create not hardened cluster from web UI
+- Fixed a crash in the `pcs cluster node add-remote` command when an id conflict occurs
+- Fixed creating a new cluster from the web UI
+- `pcs cluster node add-guest` now works with the flag `--skipp-offline`
+- `pcs cluster node remove-guest` can be run again when the guest node was unreachable first time
+- Fixed "Error: Unable to read /etc/corosync/corosync.conf" when running `pcs resource create`([rhbz#1386114])
+- Binary data are stored in corosync authkey
+- Resolves: rhbz#1284404 rhbz#1373614 rhbz#1165821 rhbz#1176018 rhbz#1386114
+
+* Fri May 26 2017 Tomas Jelinek <tojeline@redhat.com> - 0.9.158-2
+- Fixed crash of the `pcs cluster setup` command when the `--force` flag was used
+- Fixed crash of the `pcs cluster destroy --all` command when the cluster was not running
+- Fixed crash of the `pcs config restore` command when restoring pacemaker authkey
+- Fixed "Error: unable to get cib" when adding a node to a stopped cluster
+- Resolves: rhbz#1176018
+
 * Tue May 23 2017 Ivan Devat <idevat@redhat.com> - 0.9.158-1
 - Rebased to latest upstream sources (see CHANGELOG.md)
 - Resolves: rhbz#1447702 rhbz#1176018 rhbz#1433016 rhbz#1303969 rhbz#1386114 rhbz#1386512 rhbz#1390609 rhbz#1165821 rhbz#1315992 rhbz#1373614 rhbz#1422667 rhbz#1254984

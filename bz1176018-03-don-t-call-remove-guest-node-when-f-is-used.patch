@@ -1,0 +1,30 @@
+From 1a2c01a82aa7e791a5d9925ec82792e764e53740 Mon Sep 17 00:00:00 2001
+From: Ivan Devat <idevat@redhat.com>
+Date: Wed, 31 May 2017 10:44:22 +0200
+Subject: [PATCH] don't call remove guest node when -f is used
+
+`pcs cluster node remove-guest` now does not call `crm_node --remove`
+when -f is used
+---
+ pcs/lib/commands/cluster.py | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/pcs/lib/commands/cluster.py b/pcs/lib/commands/cluster.py
+index fe883f3..0b04d3d 100644
+--- a/pcs/lib/commands/cluster.py
++++ b/pcs/lib/commands/cluster.py
+@@ -464,8 +464,9 @@ def node_remove_guest(
+     env.push_cib(cib, wait)
+ 
+     #remove node from pcmk caches
+-    for node_addresses in node_addresses_list:
+-        remove_node(env.cmd_runner(), node_addresses.name)
++    if env.is_cib_live:
++        for node_addresses in node_addresses_list:
++            remove_node(env.cmd_runner(), node_addresses.name)
+ 
+ 
+ def node_clear(env, node_name, allow_clear_cluster_node=False):
+-- 
+1.8.3.1
+
