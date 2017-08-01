@@ -1,0 +1,270 @@
+From 698f63f743aa970b4af977e4a410e64ee7013fa4 Mon Sep 17 00:00:00 2001
+From: Ivan Devat <idevat@redhat.com>
+Date: Tue, 30 May 2017 17:00:41 +0200
+Subject: [PATCH] deal with -f/--corosync_conf if create remote res.
+
+Do not request corosync.conf when `pcs resource create` with -f is used
+for create remote (ocf:pacemaker:remote) or guest (meta remote-node).
+---
+ pcs/cli/common/lib_wrapper.py |  6 ++-
+ pcs/lib/commands/resource.py  | 90 ++++++++++++++++++++++++++++---------------
+ pcs/resource.py               | 13 +++++--
+ 3 files changed, 74 insertions(+), 35 deletions(-)
+
+diff --git a/pcs/cli/common/lib_wrapper.py b/pcs/cli/common/lib_wrapper.py
+index 683ba4d..4d6ed9a 100644
+--- a/pcs/cli/common/lib_wrapper.py
++++ b/pcs/cli/common/lib_wrapper.py
+@@ -318,7 +318,8 @@ def load_module(env, middleware_factory, name):
+         return bind_all(
+             env,
+             middleware.build(
+-                middleware_factory.cib
++                middleware_factory.cib,
++                middleware_factory.corosync_conf_existing,
+             ),
+             {
+                 "bundle_create": resource.bundle_create,
+@@ -338,7 +339,8 @@ def load_module(env, middleware_factory, name):
+         return bind_all(
+             env,
+             middleware.build(
+-                middleware_factory.cib
++                middleware_factory.cib,
++                middleware_factory.corosync_conf_existing,
+             ),
+             {
+                 "create": stonith.create,
+diff --git a/pcs/lib/commands/resource.py b/pcs/lib/commands/resource.py
+index a9f8271..3a060b8 100644
+--- a/pcs/lib/commands/resource.py
++++ b/pcs/lib/commands/resource.py
+@@ -46,8 +46,12 @@ def resource_environment(
+         ])
+ 
+ def _validate_remote_connection(
+-    nodes, resource_id, instance_attributes,  allow_not_suitable_command
++    resource_agent, nodes_to_validate_against, resource_id, instance_attributes,
++    allow_not_suitable_command
+ ):
++    if resource_agent.get_name() != remote_node.AGENT_NAME.full_name:
++        return []
++
+     report_list = []
+     report_list.append(
+         reports.get_problem_creator(
+@@ -58,7 +62,7 @@ def _validate_remote_connection(
+ 
+     report_list.extend(
+         remote_node.validate_host_not_conflicts(
+-            nodes,
++            nodes_to_validate_against,
+             resource_id,
+             instance_attributes
+         )
+@@ -66,8 +70,8 @@ def _validate_remote_connection(
+     return report_list
+ 
+ def _validate_guest_change(
+-    tree, nodes, meta_attributes, allow_not_suitable_command,
+-    detect_remove=False
++    tree, nodes_to_validate_against, meta_attributes,
++    allow_not_suitable_command, detect_remove=False
+ ):
+     if not guest_node.is_node_name_in_options(meta_attributes):
+         return []
+@@ -89,7 +93,7 @@ def _validate_guest_change(
+     report_list.extend(
+         guest_node.validate_conflicts(
+             tree,
+-            nodes,
++            nodes_to_validate_against,
+             node_name,
+             meta_attributes
+         )
+@@ -97,28 +101,54 @@ def _validate_guest_change(
+ 
+     return report_list
+ 
+-def _validate_special_cases(
+-    nodes, resource_agent, resources_section, resource_id, meta_attributes,
++def _get_nodes_to_validate_against(env, tree):
++    if not env.is_corosync_conf_live and env.is_cib_live:
++        raise LibraryError(
++            reports.live_environment_required(["COROSYNC_CONF"])
++        )
++
++    if not env.is_cib_live and env.is_corosync_conf_live:
++        #we do not try to get corosync.conf from live cluster when cib is not
++        #taken from live cluster
++        return get_nodes(tree=tree)
++
++    return get_nodes(env.get_corosync_conf(), tree)
++
++
++def _check_special_cases(
++    env, resource_agent, resources_section, resource_id, meta_attributes,
+     instance_attributes, allow_not_suitable_command
+ ):
+-    report_list = []
+-
+-    if resource_agent.get_name() == remote_node.AGENT_NAME.full_name:
+-        report_list.extend(_validate_remote_connection(
+-            nodes,
+-            resource_id,
+-            instance_attributes,
+-            allow_not_suitable_command,
+-        ))
++    if(
++        resource_agent.get_name() != remote_node.AGENT_NAME.full_name
++        and
++        not guest_node.is_node_name_in_options(meta_attributes)
++    ):
++        #if no special case happens we won't take care about corosync.conf that
++        #is needed for getting nodes to validate against
++        return
++
++    nodes_to_validate_against = _get_nodes_to_validate_against(
++        env,
++        resources_section
++    )
+ 
++    report_list = []
++    report_list.extend(_validate_remote_connection(
++        resource_agent,
++        nodes_to_validate_against,
++        resource_id,
++        instance_attributes,
++        allow_not_suitable_command,
++    ))
+     report_list.extend(_validate_guest_change(
+         resources_section,
+-        nodes,
++        nodes_to_validate_against,
+         meta_attributes,
+         allow_not_suitable_command,
+     ))
+ 
+-    return report_list
++    env.report_processor.process_list(report_list)
+ 
+ def create(
+     env, resource_id, resource_agent_name,
+@@ -167,15 +197,15 @@ def create(
+         [resource_id],
+         ensure_disabled or resource.common.are_meta_disabled(meta_attributes),
+     ) as resources_section:
+-        env.report_processor.process_list(_validate_special_cases(
+-            get_nodes(env.get_corosync_conf(), resources_section),
++        _check_special_cases(
++            env,
+             resource_agent,
+             resources_section,
+             resource_id,
+             meta_attributes,
+             instance_attributes,
+             allow_not_suitable_command
+-        ))
++        )
+ 
+         primitive_element = resource.primitive.create(
+             env.report_processor, resources_section,
+@@ -247,15 +277,15 @@ def _create_as_clone_common(
+             resource.common.is_clone_deactivated_by_meta(clone_meta_options)
+         )
+     ) as resources_section:
+-        env.report_processor.process_list(_validate_special_cases(
+-            get_nodes(env.get_corosync_conf(), resources_section),
++        _check_special_cases(
++            env,
+             resource_agent,
+             resources_section,
+             resource_id,
+             meta_attributes,
+             instance_attributes,
+             allow_not_suitable_command
+-        ))
++        )
+ 
+         primitive_element = resource.primitive.create(
+             env.report_processor, resources_section,
+@@ -325,15 +355,15 @@ def create_in_group(
+         [resource_id],
+         ensure_disabled or resource.common.are_meta_disabled(meta_attributes),
+     ) as resources_section:
+-        env.report_processor.process_list(_validate_special_cases(
+-            get_nodes(env.get_corosync_conf(), resources_section),
++        _check_special_cases(
++            env,
+             resource_agent,
+             resources_section,
+             resource_id,
+             meta_attributes,
+             instance_attributes,
+             allow_not_suitable_command
+-        ))
++        )
+ 
+         primitive_element = resource.primitive.create(
+             env.report_processor, resources_section,
+@@ -406,15 +436,15 @@ def create_into_bundle(
+         disabled_after_wait=ensure_disabled,
+         required_cib_version=(2, 8, 0)
+     ) as resources_section:
+-        env.report_processor.process_list(_validate_special_cases(
+-            get_nodes(env.get_corosync_conf(), resources_section),
++        _check_special_cases(
++            env,
+             resource_agent,
+             resources_section,
+             resource_id,
+             meta_attributes,
+             instance_attributes,
+             allow_not_suitable_command
+-        ))
++        )
+ 
+         primitive_element = resource.primitive.create(
+             env.report_processor, resources_section,
+diff --git a/pcs/resource.py b/pcs/resource.py
+index 4d5f43a..dc6da13 100644
+--- a/pcs/resource.py
++++ b/pcs/resource.py
+@@ -28,24 +28,31 @@ from pcs.cli.resource.parse_args import (
+     parse_bundle_update_options,
+     parse_create as parse_create_args,
+ )
+-from pcs.lib.env_tools import get_nodes
+ from pcs.lib.errors import LibraryError
++from pcs.lib.cib.resource import guest_node
+ import pcs.lib.pacemaker.live as lib_pacemaker
+ from pcs.lib.pacemaker.values import timeout_to_seconds
+ import pcs.lib.resource_agent as lib_ra
+ from pcs.cli.common.console_report import error, warn
+-from pcs.lib.commands.resource import _validate_guest_change
++from pcs.lib.commands.resource import(
++    _validate_guest_change,
++    _get_nodes_to_validate_against,
++)
+ 
+ 
+ RESOURCE_RELOCATE_CONSTRAINT_PREFIX = "pcs-relocate-"
+ 
+ def _detect_guest_change(meta_attributes, allow_not_suitable_command):
++    if not guest_node.is_node_name_in_options(meta_attributes):
++        return
++
+     env = utils.get_lib_env()
+     cib = env.get_cib()
++    nodes_to_validate_against = _get_nodes_to_validate_against(env, cib)
+     env.report_processor.process_list(
+         _validate_guest_change(
+             cib,
+-            get_nodes(env.get_corosync_conf(), cib),
++            nodes_to_validate_against,
+             meta_attributes,
+             allow_not_suitable_command,
+             detect_remove=True,
+-- 
+1.8.3.1
+

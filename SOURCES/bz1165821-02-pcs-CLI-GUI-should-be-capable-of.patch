@@ -1,0 +1,404 @@
+From 0049f2b67b084006244f73a9a94979ba524a3bdd Mon Sep 17 00:00:00 2001
+From: Ondrej Mular <omular@redhat.com>
+Date: Mon, 5 Jun 2017 10:14:16 +0200
+Subject: [PATCH] squash bz1165821  pcs CLI/GUI should be capable of
+
+ab3b909 change flag for hardened cluster to --encryption
+
+setup cluster wo corosync encryption by default
+---
+ pcs/cli/common/parse_args.py |  2 +-
+ pcs/cluster.py               | 12 +++++++-----
+ pcs/pcs.8                    |  4 ++--
+ pcs/test/test_cluster.py     | 24 ++++++++++++++++++++++++
+ pcs/usage.py                 |  6 +++---
+ pcs/utils.py                 |  2 +-
+ pcsd/pcsd.rb                 |  2 +-
+ pcsd/remote.rb               |  4 ++--
+ pcsd/views/manage.erb        | 11 +++++++----
+ 9 files changed, 48 insertions(+), 19 deletions(-)
+
+diff --git a/pcs/cli/common/parse_args.py b/pcs/cli/common/parse_args.py
+index 5b87fbc..d72a6d4 100644
+--- a/pcs/cli/common/parse_args.py
++++ b/pcs/cli/common/parse_args.py
+@@ -32,7 +32,7 @@ PCS_LONG_OPTIONS = [
+     "miss_count_const=", "fail_recv_const=",
+     "corosync_conf=", "cluster_conf=",
+     "booth-conf=", "booth-key=",
+-    "remote", "watchdog=", "device=", "no-hardened",
++    "remote", "watchdog=", "device=", "encryption=",
+     #in pcs status - do not display resorce status on inactive node
+     "hide-inactive",
+     # pcs resource (un)manage - enable or disable monitor operations
+diff --git a/pcs/cluster.py b/pcs/cluster.py
+index 0a9289b..d896b0c 100644
+--- a/pcs/cluster.py
++++ b/pcs/cluster.py
+@@ -303,6 +303,8 @@ def cluster_certkey(argv):
+ 
+ def cluster_setup(argv):
+     modifiers = utils.get_modificators()
++    if modifiers["encryption"] not in ["0", "1"]:
++        utils.err("Invalid value for option --encryption")
+     if len(argv) < 2:
+         usage.cluster(["setup"])
+         sys.exit(1)
+@@ -386,7 +388,7 @@ def cluster_setup(argv):
+             options["transport_options"],
+             options["totem_options"],
+             options["quorum_options"],
+-            modifiers["hardened"]
++            modifiers["encryption"] == "1"
+         )
+     process_library_reports(messages)
+ 
+@@ -458,7 +460,7 @@ def cluster_setup(argv):
+             file_definitions.update(
+                 node_communication_format.pcmk_authkey_file(generate_key())
+             )
+-            if modifiers["hardened"]:
++            if modifiers["encryption"] == "1":
+                 file_definitions.update(
+                     node_communication_format.corosync_authkey_file(
+                         generate_binary_key(random_bytes_count=128)
+@@ -743,7 +745,7 @@ def cluster_setup_parse_options_cman(options, force=False):
+ 
+ def cluster_setup_create_corosync_conf(
+     cluster_name, node_list, transport_options, totem_options, quorum_options,
+-    is_hardened
++    encrypted
+ ):
+     messages = []
+ 
+@@ -758,9 +760,9 @@ def cluster_setup_create_corosync_conf(
+     corosync_conf.add_section(logging_section)
+ 
+     totem_section.add_attribute("version", "2")
+-    totem_section.add_attribute("cluster_name", cluster_name)
+-    if not is_hardened:
++    if not encrypted:
+         totem_section.add_attribute("secauth", "off")
++    totem_section.add_attribute("cluster_name", cluster_name)
+ 
+     transport_options_names = (
+         "transport",
+diff --git a/pcs/pcs.8 b/pcs/pcs.8
+index aee8b3a..446e7b3 100644
+--- a/pcs/pcs.8
++++ b/pcs/pcs.8
+@@ -205,7 +205,7 @@ Add specified utilization options to specified resource. If resource is not spec
+ auth [node] [...] [\fB\-u\fR username] [\fB\-p\fR password] [\fB\-\-force\fR] [\fB\-\-local\fR]
+ Authenticate pcs to pcsd on nodes specified, or on all nodes configured in the local cluster if no nodes are specified (authorization tokens are stored in ~/.pcs/tokens or /var/lib/pcsd/tokens for root). By default all nodes are also authenticated to each other, using \fB\-\-local\fR only authenticates the local node (and does not authenticate the remote nodes with each other). Using \fB\-\-force\fR forces re\-authentication to occur.
+ .TP
+-setup [\fB\-\-start\fR [\fB\-\-wait\fR[=<n>]]] [\fB\-\-local\fR] [\fB\-\-enable\fR] \fB\-\-name\fR <cluster name> <node1[,node1\-altaddr]> [<node2[,node2\-altaddr]>] [...] [\fB\-\-transport\fR udpu|udp] [\fB\-\-rrpmode\fR active|passive] [\fB\-\-addr0\fR <addr/net> [[[\fB\-\-mcast0\fR <address>] [\fB\-\-mcastport0\fR <port>] [\fB\-\-ttl0\fR <ttl>]] | [\fB\-\-broadcast0\fR]] [\fB\-\-addr1\fR <addr/net> [[[\fB\-\-mcast1\fR <address>] [\fB\-\-mcastport1\fR <port>] [\fB\-\-ttl1\fR <ttl>]] | [\fB\-\-broadcast1\fR]]]] [\fB\-\-wait_for_all\fR=<0|1>] [\fB\-\-auto_tie_breaker\fR=<0|1>] [\fB\-\-last_man_standing\fR=<0|1> [\fB\-\-last_man_standing_window\fR=<time in ms>]] [\fB\-\-ipv6\fR] [\fB\-\-token\fR <timeout>] [\fB\-\-token_coefficient\fR <timeout>] [\fB\-\-join\fR <timeout>] [\fB\-\-consensus\fR <timeout>] [\fB\-\-miss_count_const\fR <count>] [\fB\-\-fail_recv_const\fR <failures>] [\fB\-\-no\-hardened\fR]
++setup [\fB\-\-start\fR [\fB\-\-wait\fR[=<n>]]] [\fB\-\-local\fR] [\fB\-\-enable\fR] \fB\-\-name\fR <cluster name> <node1[,node1\-altaddr]> [<node2[,node2\-altaddr]>] [...] [\fB\-\-transport\fR udpu|udp] [\fB\-\-rrpmode\fR active|passive] [\fB\-\-addr0\fR <addr/net> [[[\fB\-\-mcast0\fR <address>] [\fB\-\-mcastport0\fR <port>] [\fB\-\-ttl0\fR <ttl>]] | [\fB\-\-broadcast0\fR]] [\fB\-\-addr1\fR <addr/net> [[[\fB\-\-mcast1\fR <address>] [\fB\-\-mcastport1\fR <port>] [\fB\-\-ttl1\fR <ttl>]] | [\fB\-\-broadcast1\fR]]]] [\fB\-\-wait_for_all\fR=<0|1>] [\fB\-\-auto_tie_breaker\fR=<0|1>] [\fB\-\-last_man_standing\fR=<0|1> [\fB\-\-last_man_standing_window\fR=<time in ms>]] [\fB\-\-ipv6\fR] [\fB\-\-token\fR <timeout>] [\fB\-\-token_coefficient\fR <timeout>] [\fB\-\-join\fR <timeout>] [\fB\-\-consensus\fR <timeout>] [\fB\-\-miss_count_const\fR <count>] [\fB\-\-fail_recv_const\fR <failures>] [\fB\-\-encryption\fR 0|1]
+ Configure corosync and sync configuration out to listed nodes. \fB\-\-local\fR will only perform changes on the local node, \fB\-\-start\fR will also start the cluster on the specified nodes, \fB\-\-wait\fR will wait up to 'n' seconds for the nodes to start, \fB\-\-enable\fR will enable corosync and pacemaker on node startup, \fB\-\-transport\fR allows specification of corosync transport (default: udpu; udp for CMAN clusters), \fB\-\-rrpmode\fR allows you to set the RRP mode of the system. Currently only 'passive' is supported or tested (using 'active' is not recommended). The \fB\-\-wait_for_all\fR, \fB\-\-auto_tie_breaker\fR, \fB\-\-last_man_standing\fR, \fB\-\-last_man_standing_window\fR options are all documented in corosync's votequorum(5) man page. These options are not supported on CMAN clusters.
+ 
+ \fB\-\-ipv6\fR will configure corosync to use ipv6 (instead of ipv4).  This option is not supported on CMAN clusters.
+@@ -222,7 +222,7 @@ Configure corosync and sync configuration out to listed nodes. \fB\-\-local\fR w
+ 
+ \fB\-\-fail_recv_const\fR <failures> specifies how many rotations of the token without receiving any messages when messages should be received may occur before a new configuration is formed (default 2500 failures)
+ 
+-If \fB\-\-no\-hardened\fR is specified, the cluster will be set up in way that all corosync communication will be encrypted.
++\fB\-\-encryption\fR 0|1 disables (0) or enables (1) corosync communication encryption (default 0)
+ 
+ 
+ Configuring Redundant Ring Protocol (RRP)
+diff --git a/pcs/test/test_cluster.py b/pcs/test/test_cluster.py
+index 2b7fd5a..5c7a4a1 100644
+--- a/pcs/test/test_cluster.py
++++ b/pcs/test/test_cluster.py
+@@ -232,6 +232,7 @@ Warning: Unable to resolve hostname: nonexistant-address.invalid
+         corosync_conf = """\
+ totem {
+     version: 2
++    secauth: off
+     cluster_name: cname
+     transport: udpu
+ }
+@@ -290,6 +291,7 @@ Error: {0} already exists, use --force to overwrite
+             ac(data, """\
+ totem {
+     version: 2
++    secauth: off
+     cluster_name: cname
+     transport: udpu
+ }
+@@ -436,6 +438,7 @@ Error: {0} already exists, use --force to overwrite
+             ac(data, """\
+ totem {
+     version: 2
++    secauth: off
+     cluster_name: cname
+     transport: udpu
+ }
+@@ -476,6 +479,7 @@ logging {
+             ac(data, """\
+ totem {
+     version: 2
++    secauth: off
+     cluster_name: cname
+     transport: udpu
+ }
+@@ -520,6 +524,7 @@ logging {
+             ac(data, """\
+ totem {
+     version: 2
++    secauth: off
+     cluster_name: cname
+     transport: udpu
+ }
+@@ -560,6 +565,7 @@ logging {
+             ac(data, """\
+ totem {
+     version: 2
++    secauth: off
+     cluster_name: cname
+     transport: udpu
+ }
+@@ -605,6 +611,7 @@ logging {
+             ac(data, """\
+ totem {
+     version: 2
++    secauth: off
+     cluster_name: cname
+     transport: udpu
+ }
+@@ -646,6 +653,7 @@ logging {
+             ac(data, """\
+ totem {
+     version: 2
++    secauth: off
+     cluster_name: cname
+     transport: udpu
+ }
+@@ -687,6 +695,7 @@ logging {
+             ac(data, """\
+ totem {
+     version: 2
++    secauth: off
+     cluster_name: cname
+     transport: udpu
+ }
+@@ -727,6 +736,7 @@ logging {
+             ac(data, """\
+ totem {
+     version: 2
++    secauth: off
+     cluster_name: cname
+     transport: udpu
+ }
+@@ -772,6 +782,7 @@ logging {
+             ac(data, """\
+ totem {
+     version: 2
++    secauth: off
+     cluster_name: cname
+     transport: udpu
+ }
+@@ -817,6 +828,7 @@ logging {
+             ac(data, """\
+ totem {
+     version: 2
++    secauth: off
+     cluster_name: cname
+     transport: udpu
+ }
+@@ -866,6 +878,7 @@ logging {
+             ac(data, """\
+ totem {
+     version: 2
++    secauth: off
+     cluster_name: cname
+     transport: udp
+ }
+@@ -1266,6 +1279,7 @@ Warning: Using udpu transport on a CMAN cluster, cluster restart is required aft
+             ac(data, """\
+ totem {
+     version: 2
++    secauth: off
+     cluster_name: cname
+     transport: udpu
+     ip_version: ipv6
+@@ -1373,6 +1387,7 @@ Warning: --ipv6 ignored as it is not supported on CMAN clusters
+             ac(data, """\
+ totem {
+     version: 2
++    secauth: off
+     cluster_name: cname
+     transport: udp
+     rrp_mode: passive
+@@ -1431,6 +1446,7 @@ logging {
+             ac(data, """\
+ totem {
+     version: 2
++    secauth: off
+     cluster_name: cname
+     transport: udp
+     rrp_mode: passive
+@@ -1489,6 +1505,7 @@ logging {
+             ac(data, """\
+ totem {
+     version: 2
++    secauth: off
+     cluster_name: cname
+     transport: udp
+     rrp_mode: passive
+@@ -1547,6 +1564,7 @@ logging {
+             ac(data, """\
+ totem {
+     version: 2
++    secauth: off
+     cluster_name: cname
+     transport: udp
+     rrp_mode: passive
+@@ -1614,6 +1632,7 @@ logging {
+             ac(data, """\
+ totem {
+     version: 2
++    secauth: off
+     cluster_name: cname
+     transport: udp
+     rrp_mode: active
+@@ -1679,6 +1698,7 @@ logging {
+             ac(data, """\
+ totem {
+     version: 2
++    secauth: off
+     cluster_name: cname
+     transport: udp
+     rrp_mode: active
+@@ -1754,6 +1774,7 @@ logging {
+             ac(data, """\
+ totem {
+     version: 2
++    secauth: off
+     cluster_name: cname
+     transport: udpu
+     rrp_mode: passive
+@@ -1842,6 +1863,7 @@ logging {
+             ac(data, """\
+ totem {
+     version: 2
++    secauth: off
+     cluster_name: test99
+     transport: udpu
+ }
+@@ -2426,6 +2448,7 @@ Warning: --last_man_standing_window ignored as it is not supported on CMAN clust
+             ac(data, """\
+ totem {
+     version: 2
++    secauth: off
+     cluster_name: test99
+     transport: udpu
+     token: 20000
+@@ -2669,6 +2692,7 @@ Warning: --token_coefficient ignored as it is not supported on CMAN clusters
+             ac(data, """\
+ totem {
+     version: 2
++    secauth: off
+     cluster_name: cname
+     transport: unknown
+ }
+diff --git a/pcs/usage.py b/pcs/usage.py
+index c1ab00f..d2262a6 100644
+--- a/pcs/usage.py
++++ b/pcs/usage.py
+@@ -576,7 +576,7 @@ Commands:
+             [--ipv6] [--token <timeout>] [--token_coefficient <timeout>]
+             [--join <timeout>] [--consensus <timeout>]
+             [--miss_count_const <count>] [--fail_recv_const <failures>]
+-            [--no-hardened]
++            [--encryption 0|1]
+         Configure corosync and sync configuration out to listed nodes.
+         --local will only perform changes on the local node,
+         --start will also start the cluster on the specified nodes,
+@@ -612,8 +612,8 @@ Commands:
+             without receiving any messages when messages should be received
+             may occur before a new configuration is formed
+             (default 2500 failures)
+-        If --no-hardened is specified, the cluster will be set up in way that all
+-            corosync communication will be encrypted.
++        --encryption 0|1 disables (0) or enables (1) corosync communication
++            encryption (default 0)
+ 
+         Configuring Redundant Ring Protocol (RRP)
+ 
+diff --git a/pcs/utils.py b/pcs/utils.py
+index eec832f..d6aabf4 100644
+--- a/pcs/utils.py
++++ b/pcs/utils.py
+@@ -2879,10 +2879,10 @@ def get_modificators():
+         "device": pcs_options.get("--device", []),
+         "disabled": "--disabled" in pcs_options,
+         "enable": "--enable" in pcs_options,
++        "encryption": pcs_options.get("--encryption", "0"),
+         "force": "--force" in pcs_options,
+         "full": "--full" in pcs_options,
+         "group": pcs_options.get("--group", None),
+-        "hardened": "--no-hardened" not in pcs_options,
+         "monitor": "--monitor" in pcs_options,
+         "name": pcs_options.get("--name", None),
+         "no-default-ops": "--no-default-ops" in pcs_options,
+diff --git a/pcsd/pcsd.rb b/pcsd/pcsd.rb
+index 4d1964d..1026a36 100644
+--- a/pcsd/pcsd.rb
++++ b/pcsd/pcsd.rb
+@@ -569,7 +569,7 @@ already been added to pcsd.  You may not add two clusters with the same name int
+         :clustername => @cluster_name,
+         :nodes => @nodes_rrp.join(';'),
+         :options => options.to_json,
+-        :no_hardened => params[:no_hardened],
++        :encryption => params[:encryption],
+       },
+       true,
+       nil,
+diff --git a/pcsd/remote.rb b/pcsd/remote.rb
+index e37abb7..af74790 100644
+--- a/pcsd/remote.rb
++++ b/pcsd/remote.rb
+@@ -964,8 +964,8 @@ def setup_cluster(params, request, auth_user)
+   end
+   nodes_options = nodes + options
+   nodes_options += options_udp if transport_udp
+-  if params[:no_hardened] == "1"
+-      nodes_options << "--no-hardened"
++  if ['0', '1'].include?(params[:encryption])
++      nodes_options << "--encryption=#{params[:encryption]}"
+   end
+   stdout, stderr, retval = run_cmd(
+     auth_user, PCS, "cluster", "setup", "--enable", "--start", "--async",
+diff --git a/pcsd/views/manage.erb b/pcsd/views/manage.erb
+index a055449..2b12aaa 100644
+--- a/pcsd/views/manage.erb
++++ b/pcsd/views/manage.erb
+@@ -222,7 +222,7 @@
+       <table>
+ 	<% transport_desc = "\
+ Enables either udpu (unicast) or udp (multicast) cluster communication (default: udpu)"%>
+-	<% hardened_desc = "\
++	<% encryption_desc = "\
+ Create cluster with encrypted corosync communication. This option may not work \
+ with pcs version lower than 0.9.159." %>
+ 	<% wait_for_all_desc = "\
+@@ -348,10 +348,13 @@ Specify ring 1 address for each node if you want to use RRP." %>
+             </select>
+           </td>
+         </tr>
+-        <tr title="<%= h(hardened_desc) %>"><td align=right>Hardened:</td>
++        <tr title="<%= h(encryption_desc) %>"><td align=right>Encryption:</td>
+           <td>
+-            <label><input type="radio" name="no_hardened" value="0" checked="checked">Yes</label>
+-            <label><input type="radio" name="no_hardened" value="1">No</label>
++            <select name="encryption">
++              <option selected="selected">(Default)</option>
++              <option value="1">On</option>
++              <option value="0">Off</option>
++            </select>
+           </td>
+         </tr>
+ 	<tr title="<%= h(wait_for_all_desc) %>"><td align=right>Wait for All:</td><td><input type=checkbox name="config-wait_for_all"></td></tr>
+-- 
+1.8.3.1
+
