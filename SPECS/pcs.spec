@@ -29,6 +29,7 @@ Source22: https://rubygems.org/downloads/ethon-0.10.1.gem
 Source23: https://rubygems.org/downloads/ffi-1.9.17.gem
 
 Source31: https://github.com/testing-cabal/mock/archive/1.0.1.tar.gz#/mock-1.0.1.tar.gz
+Source99: favicon.ico
 
 Patch0: bz1176018-01-remote-guest-nodes-crashes-fixed.patch
 Patch1: bz1373614-01-return-1-when-pcsd-is-unable-to-bind.patch
@@ -187,6 +188,8 @@ cp -f %SOURCE22 pcsd/vendor/cache
 cp -f %SOURCE23 pcsd/vendor/cache
 #ruby gems copied
 
+cp -f %SOURCE99 pcsd/public
+
 %build
 
 %install
@@ -327,6 +330,9 @@ run_all_tests
 %doc CHANGELOG.md
 
 %changelog
+* Thu Nov 30 2017 Johnny Hughes <johnny@centos.org>  0.9.158-6.el7_4.1
+- Manually Debreand PCS
+
 * Mon Oct 30 2017  Ivan Devat <idevat@redhat.com> - 0.9.158-6.el7_4.1
 - `resurce update` no longer exits with an error when the `remote-node` meta attribute is set to the same value that it already has
 - Resolves: rhbz#1507399
