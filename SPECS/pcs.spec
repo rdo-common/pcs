@@ -1,6 +1,6 @@
 Name: pcs
 Version: 0.9.158
-Release: 6%{?dist}
+Release: 6%{?dist}.1
 License: GPLv2
 URL: https://github.com/ClusterLabs/pcs
 Group: System Environment/Base
@@ -44,6 +44,7 @@ Patch10: bz1433016-02-make-container-type-mandatory-in-bundle-create.patch
 Patch11: bz1284404-02-web-ui-fix-timeout-when-cluster-setup-takes-long.patch
 Patch12: bz1458153-01-give-back-orig.-master-behav.-resource-create.patch
 Patch13: bz1459503-01-OSP-workarounds-not-compatible-wi.patch
+Patch14: bz1507399-01-Make-resource-update-idempotent-with-remote-node.patch
 
 Patch100: rhel7.patch
 Patch101: change-cman-to-rhel6-in-messages.patch
@@ -159,6 +160,7 @@ UpdateTimestamps -p1 %{PATCH10}
 UpdateTimestamps -p1 %{PATCH11}
 UpdateTimestamps -p1 %{PATCH12}
 UpdateTimestamps -p1 %{PATCH13}
+UpdateTimestamps -p1 %{PATCH14}
 UpdateTimestamps -p1 %{PATCH100}
 UpdateTimestamps -p1 %{PATCH101}
 UpdateTimestamps -p1 %{PATCH102}
@@ -325,6 +327,10 @@ run_all_tests
 %doc CHANGELOG.md
 
 %changelog
+* Mon Oct 30 2017  Ivan Devat <idevat@redhat.com> - 0.9.158-6.el7_4.1
+- `resurce update` no longer exits with an error when the `remote-node` meta attribute is set to the same value that it already has
+- Resolves: rhbz#1507399
+
 * Thu Jun 15 2017 Ivan Devat <idevat@redhat.com> - 0.9.158-6
 - It is now possible to disable, enable, unmanage and manage bundle resources and set their meta attributes
 - Fixed timeout when cluster setup takes long time in web UI

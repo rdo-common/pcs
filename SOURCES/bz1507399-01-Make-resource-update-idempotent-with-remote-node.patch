@@ -1,0 +1,71 @@
+From a2d864535fc819c8b9c599aeccf1128716d56b15 Mon Sep 17 00:00:00 2001
+From: Bruno Travouillon <devel@travouillon.fr>
+Date: Fri, 29 Sep 2017 20:22:16 +0200
+Subject: [PATCH] Make resource update idempotent with remote-node
+
+If the remote-node name argument is already defined for the resource,
+do not deal with guest change.
+
+Fix issue #145.
+---
+ pcs/resource.py                      | 15 ++++++++++-----
+ pcs/test/test_cluster_pcmk_remote.py | 10 ++++++++++
+ 2 files changed, 20 insertions(+), 5 deletions(-)
+
+diff --git a/pcs/resource.py b/pcs/resource.py
+index 818cb5b..39f6fc2 100644
+--- a/pcs/resource.py
++++ b/pcs/resource.py
+@@ -723,11 +723,6 @@ def resource_update(res_id,args, deal_with_guest_change=True):
+ 
+ # Extract operation arguments
+     ra_values, op_values, meta_values = parse_resource_options(args)
+-    if deal_with_guest_change:
+-        _detect_guest_change(
+-            prepare_options(meta_values),
+-            "--force" in utils.pcs_options,
+-        )
+ 
+     wait = False
+     wait_timeout = None
+@@ -811,6 +806,16 @@ def resource_update(res_id,args, deal_with_guest_change=True):
+             instance_attributes.appendChild(ia)
+ 
+     remote_node_name = utils.dom_get_resource_remote_node_name(resource)
++
++    if remote_node_name == guest_node.get_guest_option_value(prepare_options(meta_values)):
++        deal_with_guest_change = False
++
++    if deal_with_guest_change:
++        _detect_guest_change(
++            prepare_options(meta_values),
++            "--force" in utils.pcs_options,
++        )
++
+     utils.dom_update_meta_attr(
+         resource,
+         utils.convert_args_to_tuples(meta_values)
+diff --git a/pcs/test/test_cluster_pcmk_remote.py b/pcs/test/test_cluster_pcmk_remote.py
+index 0db4a5c..aa6a215 100644
+--- a/pcs/test/test_cluster_pcmk_remote.py
++++ b/pcs/test/test_cluster_pcmk_remote.py
+@@ -291,6 +291,16 @@ class NodeAddGuest(ResourceTest):
+             output=fixture_nolive_add_report
+         )
+ 
++    def test_success_when_guest_node_matches_with_existing_guest(self):
++        self.create_resource()
++        self.assert_pcs_success(
++            "cluster node add-guest node-host G",
++            fixture_nolive_add_report
++        )
++        self.assert_pcs_success(
++            "resource update G meta remote-node=node-host",
++        )
++
+     def test_success_with_options(self):
+         self.create_resource()
+         self.assert_effect(
+-- 
+1.8.3.1
+
