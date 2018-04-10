@@ -1,4 +1,4 @@
-From 9fadaf3189f3c19bf6c2802f7a4a2b9c8c6638c1 Mon Sep 17 00:00:00 2001
+From fe7151898fed1b6383a49db26426c3f23c5ff7f2 Mon Sep 17 00:00:00 2001
 From: Ivan Devat <idevat@redhat.com>
 Date: Mon, 5 Jun 2017 17:13:41 +0200
 Subject: [PATCH] give back orig. --master behav. (resource create)
@@ -14,10 +14,10 @@ Subject: [PATCH] give back orig. --master behav. (resource create)
  7 files changed, 228 insertions(+), 59 deletions(-)
 
 diff --git a/pcs/cli/common/parse_args.py b/pcs/cli/common/parse_args.py
-index d72a6d4..3cd96c9 100644
+index 70b926c0..d3151043 100644
 --- a/pcs/cli/common/parse_args.py
 +++ b/pcs/cli/common/parse_args.py
-@@ -300,7 +300,13 @@ def upgrade_args(arg_list):
+@@ -299,7 +299,13 @@ def upgrade_args(arg_list):
              and
              args_without_options[:2] == ["resource", "create"]
          ):
@@ -33,10 +33,10 @@ index d72a6d4..3cd96c9 100644
              upgraded_args.append(arg)
      return upgraded_args
 diff --git a/pcs/cli/common/test/test_parse_args.py b/pcs/cli/common/test/test_parse_args.py
-index 5b79b85..1ce03b4 100644
+index efe38d0e..900094c9 100644
 --- a/pcs/cli/common/test/test_parse_args.py
 +++ b/pcs/cli/common/test/test_parse_args.py
-@@ -487,9 +487,21 @@ class UpgradeArgs(TestCase):
+@@ -486,9 +486,21 @@ class UpgradeArgs(TestCase):
              upgrade_args(["first", "--cloneopt=1", "second"])
          )
  
@@ -61,7 +61,7 @@ index 5b79b85..1ce03b4 100644
              upgrade_args(["resource", "create", "--master", "second"])
          )
  
-@@ -499,10 +511,22 @@ class UpgradeArgs(TestCase):
+@@ -498,10 +510,22 @@ class UpgradeArgs(TestCase):
              upgrade_args(["first", "--master", "second"])
          )
  
@@ -87,10 +87,10 @@ index 5b79b85..1ce03b4 100644
              ],
              upgrade_args([
 diff --git a/pcs/resource.py b/pcs/resource.py
-index 467faa5..818cb5b 100644
+index 082bd9d1..6637f806 100644
 --- a/pcs/resource.py
 +++ b/pcs/resource.py
-@@ -375,6 +375,25 @@ def resource_create(lib, argv, modifiers):
+@@ -384,6 +384,25 @@ def resource_create(lib, argv, modifiers):
      ra_type = argv[1]
  
      parts = parse_create_args(argv[2:])
@@ -117,10 +117,10 @@ index 467faa5..818cb5b 100644
      defined_options = [opt for opt in parts_sections if opt in parts]
      if modifiers["group"]:
 diff --git a/pcs/test/cib_resource/test_create.py b/pcs/test/cib_resource/test_create.py
-index 2492ba9..045ce68 100644
+index cfb2e645..c554ec24 100644
 --- a/pcs/test/cib_resource/test_create.py
 +++ b/pcs/test/cib_resource/test_create.py
-@@ -223,7 +223,7 @@ class Success(ResourceTest):
+@@ -233,7 +233,7 @@ class Success(ResourceTest):
      def test_with_master(self):
          self.assert_effect(
              [
@@ -129,7 +129,7 @@ index 2492ba9..045ce68 100644
                  "resource create R ocf:heartbeat:Dummy --no-default-ops master",
              ],
              """<resources>
-@@ -609,7 +609,7 @@ class SuccessGroup(ResourceTest):
+@@ -654,7 +654,7 @@ class SuccessGroup(ResourceTest):
  class SuccessMaster(ResourceTest):
      def test_disable_is_on_master_element(self):
          self.assert_effect(
@@ -138,7 +138,7 @@ index 2492ba9..045ce68 100644
              """<resources>
                  <master id="R-master">
                      <meta_attributes id="R-master-meta_attributes">
-@@ -630,13 +630,55 @@ class SuccessMaster(ResourceTest):
+@@ -675,13 +675,55 @@ class SuccessMaster(ResourceTest):
              </resources>"""
          )
  
@@ -197,7 +197,7 @@ index 2492ba9..045ce68 100644
              ,
              """<resources>
                  <master id="R-master">
-@@ -644,6 +686,9 @@ class SuccessMaster(ResourceTest):
+@@ -689,6 +731,9 @@ class SuccessMaster(ResourceTest):
                          type="Dummy"
                      >
                          <instance_attributes id="R-instance_attributes">
@@ -207,7 +207,7 @@ index 2492ba9..045ce68 100644
                              <nvpair id="R-instance_attributes-state"
                                  name="state" value="a"
                              />
-@@ -660,22 +705,58 @@ class SuccessMaster(ResourceTest):
+@@ -714,22 +759,58 @@ class SuccessMaster(ResourceTest):
                              />
                          </operations>
                      </primitive>
@@ -276,7 +276,7 @@ index 2492ba9..045ce68 100644
                  " --no-default-ops"
              ,
              """<resources>
-@@ -690,22 +771,53 @@ class SuccessMaster(ResourceTest):
+@@ -744,22 +825,53 @@ class SuccessMaster(ResourceTest):
                          </instance_attributes>
                          <operations>
                              <op id="R-monitor-interval-10s" interval="10s"
@@ -340,7 +340,7 @@ index 2492ba9..045ce68 100644
          """
          self.assert_effect(
              "resource create R ocf:heartbeat:Dummy meta a=b --master b=c"
-@@ -716,11 +828,6 @@ class SuccessMaster(ResourceTest):
+@@ -770,11 +882,6 @@ class SuccessMaster(ResourceTest):
                      <primitive class="ocf" id="R" provider="heartbeat"
                          type="Dummy"
                      >
@@ -352,7 +352,7 @@ index 2492ba9..045ce68 100644
                          <operations>
                              <op id="R-monitor-interval-10" interval="10"
                                  name="monitor" timeout="20"
-@@ -728,18 +835,24 @@ class SuccessMaster(ResourceTest):
+@@ -782,18 +889,24 @@ class SuccessMaster(ResourceTest):
                          </operations>
                      </primitive>
                      <meta_attributes id="R-master-meta_attributes">
@@ -378,7 +378,7 @@ index 2492ba9..045ce68 100644
              ,
              """<resources>
                  <master id="R-master">
-@@ -960,7 +1073,7 @@ class FailOrWarn(ResourceTest):
+@@ -1041,7 +1154,7 @@ class FailOrWarn(ResourceTest):
      def test_error_master_clone_combination(self):
          self.assert_pcs_fail(
              "resource create R ocf:heartbeat:Dummy --no-default-ops --clone"
@@ -387,7 +387,7 @@ index 2492ba9..045ce68 100644
              ,
              "Error: you can specify only one of clone, master, bundle or"
                  " --group\n"
-@@ -968,7 +1081,7 @@ class FailOrWarn(ResourceTest):
+@@ -1049,7 +1162,7 @@ class FailOrWarn(ResourceTest):
  
      def test_error_master_group_combination(self):
          self.assert_pcs_fail(
@@ -396,7 +396,7 @@ index 2492ba9..045ce68 100644
                  " --group G"
              ,
              "Error: you can specify only one of clone, master, bundle or"
-@@ -986,7 +1099,7 @@ class FailOrWarn(ResourceTest):
+@@ -1067,7 +1180,7 @@ class FailOrWarn(ResourceTest):
  
      def test_error_bundle_master_combination(self):
          self.assert_pcs_fail(
@@ -406,10 +406,10 @@ index 2492ba9..045ce68 100644
              ,
              "Error: you can specify only one of clone, master, bundle or"
 diff --git a/pcs/test/test_constraints.py b/pcs/test/test_constraints.py
-index 4160b01..152218e 100644
+index 9f0bc5d6..f5973410 100644
 --- a/pcs/test/test_constraints.py
 +++ b/pcs/test/test_constraints.py
-@@ -341,43 +341,43 @@ Ticket Constraints:
+@@ -346,43 +346,43 @@ Ticket Constraints:
  
      def testColocationConstraints(self):
          # see also BundleColocation
@@ -500,10 +500,10 @@ index 4160b01..152218e 100644
          ac(output, """\
  Warning: changing a monitor operation interval from 10 to 11 to make the operation unique
 diff --git a/pcs/test/test_resource.py b/pcs/test/test_resource.py
-index c015fa4..5bc9517 100644
+index bd596f64..d8f68c12 100644
 --- a/pcs/test/test_resource.py
 +++ b/pcs/test/test_resource.py
-@@ -2729,7 +2729,7 @@ Ticket Constraints:
+@@ -2826,7 +2826,7 @@ Ticket Constraints:
  
          output, returnVal  = pcs(
              temp_cib,
@@ -512,7 +512,7 @@ index c015fa4..5bc9517 100644
          )
          assert returnVal == 0
          assert output == "", [output]
-@@ -2797,7 +2797,7 @@ Warning: changing a monitor operation interval from 10 to 11 to make the operati
+@@ -2919,7 +2919,7 @@ Warning: changing a monitor operation interval from 10 to 11 to make the operati
          ac(o,"")
          assert r == 0
  
@@ -521,7 +521,7 @@ index c015fa4..5bc9517 100644
          ac(o,"")
          assert r == 0
  
-@@ -3011,7 +3011,7 @@ Warning: changing a monitor operation interval from 10 to 11 to make the operati
+@@ -3133,7 +3133,7 @@ Warning: changing a monitor operation interval from 10 to 11 to make the operati
  
          output, returnVal = pcs(
              temp_cib,
@@ -530,7 +530,7 @@ index c015fa4..5bc9517 100644
          )
          ac(output, "")
          self.assertEqual(0, returnVal)
-@@ -3602,7 +3602,7 @@ Error: Cannot remove more than one resource from cloned group
+@@ -3727,7 +3727,7 @@ Error: Cannot remove more than one resource from cloned group
          # However those test the pcs library. I'm leaving these tests here to
          # test the cli part for now.
          self.assert_pcs_success(
@@ -539,7 +539,7 @@ index c015fa4..5bc9517 100644
              "Warning: changing a monitor operation interval from 10 to 11 to make the operation unique\n"
          )
  
-@@ -4630,7 +4630,7 @@ class CloneMasterUpdate(unittest.TestCase, AssertPcsMixin):
+@@ -4761,7 +4761,7 @@ class CloneMasterUpdate(unittest.TestCase, AssertPcsMixin):
  
      def test_no_op_allowed_in_master_update(self):
          self.assert_pcs_success(
@@ -549,10 +549,10 @@ index c015fa4..5bc9517 100644
          self.assert_pcs_success("resource show dummy-master", outdent(
              """\
 diff --git a/pcs/utils.py b/pcs/utils.py
-index d6aabf4..255fcf8 100644
+index 5b608239..9b46810f 100644
 --- a/pcs/utils.py
 +++ b/pcs/utils.py
-@@ -2890,6 +2890,13 @@ def get_modificators():
+@@ -2861,6 +2861,13 @@ def get_modificators():
          "start": "--start" in pcs_options,
          "wait": pcs_options.get("--wait", False),
          "watchdog": pcs_options.get("--watchdog", []),
@@ -567,5 +567,5 @@ index d6aabf4..255fcf8 100644
  
  def exit_on_cmdline_input_errror(error, main_name, usage_name):
 -- 
-1.8.3.1
+2.13.6
 

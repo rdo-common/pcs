@@ -1,4 +1,4 @@
-From cff71cf607ae7d0b42f61fbc0159e2bccd559ee8 Mon Sep 17 00:00:00 2001
+From 39c0da04f3f9087ab9115e08e45cc7c8b7d12a95 Mon Sep 17 00:00:00 2001
 From: Ivan Devat <idevat@redhat.com>
 Date: Tue, 24 May 2016 07:26:15 +0200
 Subject: [PATCH] adapt working with gems to rhel 7
@@ -10,7 +10,7 @@ Subject: [PATCH] adapt working with gems to rhel 7
  3 files changed, 2 insertions(+), 13 deletions(-)
 
 diff --git a/pcsd/Gemfile b/pcsd/Gemfile
-index e01b31c..02134fd 100644
+index e01b31ca..02134fd4 100644
 --- a/pcsd/Gemfile
 +++ b/pcsd/Gemfile
 @@ -1,9 +1,5 @@
@@ -34,7 +34,7 @@ index e01b31c..02134fd 100644
  gem 'open4'
  gem 'orderedhash'
 diff --git a/pcsd/Gemfile.lock b/pcsd/Gemfile.lock
-index a3fab96..36853bd 100644
+index dcb0d053..fd5a8dcc 100644
 --- a/pcsd/Gemfile.lock
 +++ b/pcsd/Gemfile.lock
 @@ -1,11 +1,9 @@
@@ -42,11 +42,11 @@ index a3fab96..36853bd 100644
    remote: https://rubygems.org/
 -  remote: https://tojeline.fedorapeople.org/rubygems/
    specs:
-     backports (3.6.8)
+     backports (3.9.1)
      ethon (0.10.1)
-     ffi (1.9.17)
--    json (2.0.3)
-     multi_json (1.12.1)
+     ffi (1.9.18)
+-    json (2.1.0)
+     multi_json (1.12.2)
      open4 (1.3.4)
      orderedhash (0.0.6)
 @@ -35,7 +33,6 @@ DEPENDENCIES
@@ -58,11 +58,11 @@ index a3fab96..36853bd 100644
    open4
    orderedhash
 diff --git a/pcsd/Makefile b/pcsd/Makefile
-index 2ecd4de..10719e1 100644
+index d452ac06..f8452c5c 100644
 --- a/pcsd/Makefile
 +++ b/pcsd/Makefile
 @@ -1,7 +1,7 @@
- FFI_VERSION="1.9.17"
+ FFI_VERSION="1.9.18"
  FFI_C_DIR=vendor/bundle/ruby/gems/ffi-${FFI_VERSION}/ext/ffi_c
  
 -build_gems: get_gems
@@ -80,5 +80,5 @@ index 2ecd4de..10719e1 100644
  clean:
  	rm -rfv vendor/
 -- 
-1.8.3.1
+2.13.6
 

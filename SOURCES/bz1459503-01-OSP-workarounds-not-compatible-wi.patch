@@ -1,4 +1,4 @@
-From 764f74bb363613c63c3757637267bf37ee2381a0 Mon Sep 17 00:00:00 2001
+From b5f98fed9903bc6c4e30056aa99f3be6fcb68917 Mon Sep 17 00:00:00 2001
 From: Ivan Devat <idevat@redhat.com>
 Date: Wed, 7 Jun 2017 14:36:05 +0200
 Subject: [PATCH] squash bz1459503 OSP workarounds not compatible wi
@@ -14,10 +14,10 @@ show only warn if `resource create` creates remote
  4 files changed, 31 insertions(+), 22 deletions(-)
 
 diff --git a/pcs/cluster.py b/pcs/cluster.py
-index d896b0c..16eb0c5 100644
+index b66bec78..a3cc74c6 100644
 --- a/pcs/cluster.py
 +++ b/pcs/cluster.py
-@@ -452,13 +452,21 @@ def cluster_setup(argv):
+@@ -501,13 +501,21 @@ def cluster_setup(argv):
          print("Destroying cluster on nodes: {0}...".format(
              ", ".join(primary_addr_list)
          ))
@@ -41,10 +41,10 @@ index d896b0c..16eb0c5 100644
              if modifiers["encryption"] == "1":
                  file_definitions.update(
 diff --git a/pcs/lib/commands/resource.py b/pcs/lib/commands/resource.py
-index 0c5f682..0c4d6fc 100644
+index 8cda3102..cb45771f 100644
 --- a/pcs/lib/commands/resource.py
 +++ b/pcs/lib/commands/resource.py
-@@ -69,7 +69,8 @@ def _validate_remote_connection(
+@@ -67,7 +67,8 @@ def _validate_remote_connection(
      report_list.append(
          reports.get_problem_creator(
              report_codes.FORCE_NOT_SUITABLE_COMMAND,
@@ -54,7 +54,7 @@ index 0c5f682..0c4d6fc 100644
          )(reports.use_command_node_add_remote)
      )
  
-@@ -99,7 +100,8 @@ def _validate_guest_change(
+@@ -97,7 +98,8 @@ def _validate_guest_change(
      report_list.append(
          reports.get_problem_creator(
              report_codes.FORCE_NOT_SUITABLE_COMMAND,
@@ -65,10 +65,10 @@ index 0c5f682..0c4d6fc 100644
      )
  
 diff --git a/pcs/test/cib_resource/test_create.py b/pcs/test/cib_resource/test_create.py
-index 045ce68..afd7d0a 100644
+index c554ec24..282ce1c5 100644
 --- a/pcs/test/cib_resource/test_create.py
 +++ b/pcs/test/cib_resource/test_create.py
-@@ -1463,11 +1463,10 @@ class FailOrWarnGroup(ResourceTest):
+@@ -1581,11 +1581,10 @@ class FailOrWarnGroup(ResourceTest):
          )
  
      def test_fail_when_on_pacemaker_remote_attempt(self):
@@ -83,7 +83,7 @@ index 045ce68..afd7d0a 100644
          )
  
      def test_warn_when_on_pacemaker_remote_attempt(self):
-@@ -1567,10 +1566,10 @@ class FailOrWarnGroup(ResourceTest):
+@@ -1685,10 +1684,10 @@ class FailOrWarnGroup(ResourceTest):
          )
  
      def test_fail_when_on_pacemaker_remote_guest_attempt(self):
@@ -98,10 +98,10 @@ index 045ce68..afd7d0a 100644
  
      def test_warn_when_on_pacemaker_remote_guest_attempt(self):
 diff --git a/pcs/test/test_resource.py b/pcs/test/test_resource.py
-index 5bc9517..9ab1dd5 100644
+index d8f68c12..eac7eb04 100644
 --- a/pcs/test/test_resource.py
 +++ b/pcs/test/test_resource.py
-@@ -4973,10 +4973,10 @@ class ResourceUpdateSpcialChecks(unittest.TestCase, AssertPcsMixin):
+@@ -5110,10 +5110,10 @@ class ResourceUpdateSpcialChecks(unittest.TestCase, AssertPcsMixin):
          self.assert_pcs_success(
              "resource create R ocf:heartbeat:Dummy",
          )
@@ -115,7 +115,7 @@ index 5bc9517..9ab1dd5 100644
          )
      def test_update_warn_on_pacemaker_guest_attempt(self):
          self.assert_pcs_success(
-@@ -4995,10 +4995,10 @@ class ResourceUpdateSpcialChecks(unittest.TestCase, AssertPcsMixin):
+@@ -5132,10 +5132,10 @@ class ResourceUpdateSpcialChecks(unittest.TestCase, AssertPcsMixin):
              "Warning: this command is not sufficient for creating a guest node,"
              " use 'pcs cluster node add-guest'\n"
          )
@@ -129,7 +129,7 @@ index 5bc9517..9ab1dd5 100644
          )
  
      def test_update_warn_on_pacemaker_guest_attempt_remove(self):
-@@ -5019,10 +5019,10 @@ class ResourceUpdateSpcialChecks(unittest.TestCase, AssertPcsMixin):
+@@ -5156,10 +5156,10 @@ class ResourceUpdateSpcialChecks(unittest.TestCase, AssertPcsMixin):
          self.assert_pcs_success(
              "resource create R ocf:heartbeat:Dummy",
          )
@@ -143,7 +143,7 @@ index 5bc9517..9ab1dd5 100644
          )
  
      def test_meta_warn_on_pacemaker_guest_attempt(self):
-@@ -5043,10 +5043,10 @@ class ResourceUpdateSpcialChecks(unittest.TestCase, AssertPcsMixin):
+@@ -5180,10 +5180,10 @@ class ResourceUpdateSpcialChecks(unittest.TestCase, AssertPcsMixin):
              "Warning: this command is not sufficient for creating a guest node,"
              " use 'pcs cluster node add-guest'\n"
          )
@@ -158,5 +158,5 @@ index 5bc9517..9ab1dd5 100644
  
      def test_meta_warn_on_pacemaker_guest_attempt_remove(self):
 -- 
-1.8.3.1
+2.13.6
 

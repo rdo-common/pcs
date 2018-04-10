@@ -1,4 +1,4 @@
-From 25b32eed71eb0d22330867f962c34ec5f515e3c9 Mon Sep 17 00:00:00 2001
+From 0f462859f1a923093f211ea9813b8147f00be431 Mon Sep 17 00:00:00 2001
 From: Ivan Devat <idevat@redhat.com>
 Date: Mon, 23 May 2016 17:00:13 +0200
 Subject: [PATCH] change cman to rhel6 in messages
@@ -17,10 +17,10 @@ Subject: [PATCH] change cman to rhel6 in messages
  10 files changed, 47 insertions(+), 47 deletions(-)
 
 diff --git a/pcs/cli/common/console_report.py b/pcs/cli/common/console_report.py
-index 793ff8d..57b2d64 100644
+index 406532dd..75fcf562 100644
 --- a/pcs/cli/common/console_report.py
 +++ b/pcs/cli/common/console_report.py
-@@ -583,7 +583,7 @@ CODE_TO_MESSAGE_BUILDER_MAP = {
+@@ -642,7 +642,7 @@ CODE_TO_MESSAGE_BUILDER_MAP = {
      ,
  
      codes.CMAN_UNSUPPORTED_COMMAND:
@@ -29,7 +29,7 @@ index 793ff8d..57b2d64 100644
      ,
  
      codes.ID_ALREADY_EXISTS: lambda info:
-@@ -813,7 +813,7 @@ CODE_TO_MESSAGE_BUILDER_MAP = {
+@@ -889,7 +889,7 @@ CODE_TO_MESSAGE_BUILDER_MAP = {
      ,
  
      codes.IGNORED_CMAN_UNSUPPORTED_OPTION: lambda info:
@@ -38,7 +38,7 @@ index 793ff8d..57b2d64 100644
          .format(**info)
      ,
  
-@@ -822,12 +822,12 @@ CODE_TO_MESSAGE_BUILDER_MAP = {
+@@ -898,12 +898,12 @@ CODE_TO_MESSAGE_BUILDER_MAP = {
      ,
  
      codes.CMAN_UDPU_RESTART_REQUIRED: (
@@ -54,10 +54,10 @@ index 793ff8d..57b2d64 100644
      ),
  
 diff --git a/pcs/cluster.py b/pcs/cluster.py
-index 16eb0c5..7720771 100644
+index a3cc74c6..ecafa756 100644
 --- a/pcs/cluster.py
 +++ b/pcs/cluster.py
-@@ -1862,7 +1862,7 @@ def node_add(lib_env, node0, node1, modifiers):
+@@ -1938,7 +1938,7 @@ def node_add(lib_env, node0, node1, modifiers):
      else:
          utils.err("Unable to update any nodes")
      if utils.is_cman_with_udpu_transport():
@@ -66,7 +66,7 @@ index 16eb0c5..7720771 100644
              + "cluster restart is required to apply node addition")
      if wait:
          print()
-@@ -1938,7 +1938,7 @@ def node_remove(lib_env, node0, modifiers):
+@@ -2014,7 +2014,7 @@ def node_remove(lib_env, node0, modifiers):
      output, retval = utils.reloadCorosync()
      output, retval = utils.run(["crm_node", "--force", "-R", node0])
      if utils.is_cman_with_udpu_transport():
@@ -75,7 +75,7 @@ index 16eb0c5..7720771 100644
              + "cluster restart is required to apply node removal")
  
  def cluster_localnode(argv):
-@@ -2106,7 +2106,7 @@ def cluster_uidgid(argv, silent_list = False):
+@@ -2182,7 +2182,7 @@ def cluster_uidgid(argv, silent_list = False):
  
  def cluster_get_corosync_conf(argv):
      if utils.is_rhel6():
@@ -85,10 +85,10 @@ index 16eb0c5..7720771 100644
      if len(argv) > 1:
          usage.cluster()
 diff --git a/pcs/config.py b/pcs/config.py
-index 5526eb5..389122b 100644
+index ac32b669..450403c0 100644
 --- a/pcs/config.py
 +++ b/pcs/config.py
-@@ -614,7 +614,7 @@ def config_checkpoint_restore(argv):
+@@ -613,7 +613,7 @@ def config_checkpoint_restore(argv):
  
  def config_import_cman(argv):
      if no_clufter:
@@ -98,10 +98,10 @@ index 5526eb5..389122b 100644
      cluster_conf = settings.cluster_conf_file
      dry_run_output = None
 diff --git a/pcs/pcs.8 b/pcs/pcs.8
-index 27298a7..4acddb8 100644
+index 15454c7f..02eab591 100644
 --- a/pcs/pcs.8
 +++ b/pcs/pcs.8
-@@ -206,13 +206,13 @@ auth [node] [...] [\fB\-u\fR username] [\fB\-p\fR password] [\fB\-\-force\fR] [\
+@@ -209,13 +209,13 @@ auth [<node>[:<port>]] [...] [\fB\-u\fR <username>] [\fB\-p\fR <password>] [\fB\
  Authenticate pcs to pcsd on nodes specified, or on all nodes configured in the local cluster if no nodes are specified (authorization tokens are stored in ~/.pcs/tokens or /var/lib/pcsd/tokens for root). By default all nodes are also authenticated to each other, using \fB\-\-local\fR only authenticates the local node (and does not authenticate the remote nodes with each other). Using \fB\-\-force\fR forces re\-authentication to occur.
  .TP
  setup [\fB\-\-start\fR [\fB\-\-wait\fR[=<n>]]] [\fB\-\-local\fR] [\fB\-\-enable\fR] \fB\-\-name\fR <cluster name> <node1[,node1\-altaddr]> [<node2[,node2\-altaddr]>] [...] [\fB\-\-transport\fR udpu|udp] [\fB\-\-rrpmode\fR active|passive] [\fB\-\-addr0\fR <addr/net> [[[\fB\-\-mcast0\fR <address>] [\fB\-\-mcastport0\fR <port>] [\fB\-\-ttl0\fR <ttl>]] | [\fB\-\-broadcast0\fR]] [\fB\-\-addr1\fR <addr/net> [[[\fB\-\-mcast1\fR <address>] [\fB\-\-mcastport1\fR <port>] [\fB\-\-ttl1\fR <ttl>]] | [\fB\-\-broadcast1\fR]]]] [\fB\-\-wait_for_all\fR=<0|1>] [\fB\-\-auto_tie_breaker\fR=<0|1>] [\fB\-\-last_man_standing\fR=<0|1> [\fB\-\-last_man_standing_window\fR=<time in ms>]] [\fB\-\-ipv6\fR] [\fB\-\-token\fR <timeout>] [\fB\-\-token_coefficient\fR <timeout>] [\fB\-\-join\fR <timeout>] [\fB\-\-consensus\fR <timeout>] [\fB\-\-miss_count_const\fR <count>] [\fB\-\-fail_recv_const\fR <failures>] [\fB\-\-encryption\fR 0|1]
@@ -118,7 +118,7 @@ index 27298a7..4acddb8 100644
  
  \fB\-\-join\fR <timeout> sets time in milliseconds to wait for join messages (default 50 ms)
  
-@@ -729,10 +729,10 @@ checkpoint restore <checkpoint_number>
+@@ -738,10 +738,10 @@ checkpoint restore <checkpoint_number>
  Restore cluster configuration to specified checkpoint.
  .TP
  import\-cman output=<filename> [input=<filename>] [\fB\-\-interactive\fR] [output\-format=corosync.conf|cluster.conf] [dist=<dist>]
@@ -132,10 +132,10 @@ index 27298a7..4acddb8 100644
  export pcs\-commands|pcs\-commands\-verbose [output=<filename>] [dist=<dist>]
  Creates a list of pcs commands which upon execution recreates the current cluster running on this node.  Commands will be saved to 'output' file or written to stdout if 'output' is not specified.  Use pcs\-commands to get a simple list of commands, whereas pcs\-commands\-verbose creates a list including comments and debug messages.  Optionally specify output version by setting 'dist' option e. g. rhel,6.8 or redhat,7.3 or debian,7 or ubuntu,trusty.  You can get the list of supported dist values by running the "clufter \fB\-\-list\-dists\fR" command.  If 'dist' is not specified, it defaults to this node's version.
 diff --git a/pcs/quorum.py b/pcs/quorum.py
-index 937b057..8e8431c 100644
+index 10c27602..7140efdf 100644
 --- a/pcs/quorum.py
 +++ b/pcs/quorum.py
-@@ -196,7 +196,7 @@ def quorum_unblock_cmd(argv):
+@@ -245,7 +245,7 @@ def quorum_unblock_cmd(argv):
          sys.exit(1)
  
      if utils.is_rhel6():
@@ -145,10 +145,10 @@ index 937b057..8e8431c 100644
      output, retval = utils.run(
          ["corosync-cmapctl", "-g", "runtime.votequorum.wait_for_all_status"]
 diff --git a/pcs/test/test_cluster.py b/pcs/test/test_cluster.py
-index 5c7a4a1..a3836be 100644
+index 01998f0f..194f544e 100644
 --- a/pcs/test/test_cluster.py
 +++ b/pcs/test/test_cluster.py
-@@ -1228,7 +1228,7 @@ logging {
+@@ -1335,7 +1335,7 @@ logging {
              .format(cluster_conf_tmp)
          )
          ac(output, """\
@@ -157,7 +157,7 @@ index 5c7a4a1..a3836be 100644
  """)
          self.assertEqual(returnVal, 0)
          with open(cluster_conf_tmp) as f:
-@@ -1320,7 +1320,7 @@ logging {
+@@ -1427,7 +1427,7 @@ logging {
              .format(cluster_conf_tmp)
          )
          ac(output, """\
@@ -166,7 +166,7 @@ index 5c7a4a1..a3836be 100644
  """)
          self.assertEqual(returnVal, 0)
          with open(cluster_conf_tmp) as f:
-@@ -1914,7 +1914,7 @@ logging {
+@@ -2021,7 +2021,7 @@ logging {
          )
          ac(output, """\
  Error: 'blah' is not a valid RRP mode value, use active, passive, use --force to override
@@ -175,7 +175,7 @@ index 5c7a4a1..a3836be 100644
  """)
          self.assertEqual(returnVal, 1)
  
-@@ -2193,7 +2193,7 @@ Warning: Enabling broadcast for all rings as CMAN does not support broadcast in
+@@ -2300,7 +2300,7 @@ Warning: Enabling broadcast for all rings as CMAN does not support broadcast in
          )
          ac(output, """\
  Error: using a RRP mode of 'active' is not supported or tested, use --force to override
@@ -184,7 +184,7 @@ index 5c7a4a1..a3836be 100644
  """)
          self.assertEqual(returnVal, 1)
  
-@@ -2203,7 +2203,7 @@ Warning: Enabling broadcast for all rings as CMAN does not support broadcast in
+@@ -2310,7 +2310,7 @@ Warning: Enabling broadcast for all rings as CMAN does not support broadcast in
              .format(cluster_conf_tmp)
          )
          ac(output, """\
@@ -193,7 +193,7 @@ index 5c7a4a1..a3836be 100644
  Warning: using a RRP mode of 'active' is not supported or tested
  """)
          self.assertEqual(returnVal, 0)
-@@ -2272,7 +2272,7 @@ Error: if one node is configured for RRP, all nodes must be configured for RRP
+@@ -2379,7 +2379,7 @@ Error: if one node is configured for RRP, all nodes must be configured for RRP
          )
          ac(output, """\
  Error: --addr0 and --addr1 can only be used with --transport=udp
@@ -202,7 +202,7 @@ index 5c7a4a1..a3836be 100644
  """)
          self.assertEqual(returnVal, 1)
  
-@@ -2362,7 +2362,7 @@ Warning: Using udpu transport on a CMAN cluster, cluster restart is required aft
+@@ -2469,7 +2469,7 @@ Warning: Using udpu transport on a CMAN cluster, cluster restart is required aft
              .format(cluster_conf_tmp)
          )
          ac(output, """\
@@ -211,7 +211,7 @@ index 5c7a4a1..a3836be 100644
  """)
          self.assertEqual(returnVal, 0)
          with open(cluster_conf_tmp) as f:
-@@ -2377,7 +2377,7 @@ Warning: Enabling broadcast for all rings as CMAN does not support broadcast in
+@@ -2484,7 +2484,7 @@ Warning: Enabling broadcast for all rings as CMAN does not support broadcast in
              .format(cluster_conf_tmp)
          )
          ac(output, """\
@@ -220,7 +220,7 @@ index 5c7a4a1..a3836be 100644
  """)
          self.assertEqual(returnVal, 0)
          with open(cluster_conf_tmp) as f:
-@@ -2395,10 +2395,10 @@ Warning: Enabling broadcast for all rings as CMAN does not support broadcast in
+@@ -2502,10 +2502,10 @@ Warning: Enabling broadcast for all rings as CMAN does not support broadcast in
              .format(cluster_conf_tmp)
          )
          ac(output, """\
@@ -235,7 +235,7 @@ index 5c7a4a1..a3836be 100644
  """)
          self.assertEqual(returnVal, 0)
          with open(cluster_conf_tmp) as f:
-@@ -2494,7 +2494,7 @@ logging {
+@@ -2601,7 +2601,7 @@ logging {
              .format(cluster_conf_tmp)
          )
          ac(output, """\
@@ -245,10 +245,10 @@ index 5c7a4a1..a3836be 100644
          self.assertEqual(returnVal, 0)
          with open(cluster_conf_tmp) as f:
 diff --git a/pcs/usage.py b/pcs/usage.py
-index 9cbf7de..4a9f2f2 100644
+index 090a150f..3a83f777 100644
 --- a/pcs/usage.py
 +++ b/pcs/usage.py
-@@ -585,23 +585,23 @@ Commands:
+@@ -603,23 +603,23 @@ Commands:
          --wait will wait up to 'n' seconds for the nodes to start,
          --enable will enable corosync and pacemaker on node startup,
          --transport allows specification of corosync transport (default: udpu;
@@ -276,7 +276,7 @@ index 9cbf7de..4a9f2f2 100644
          --join <timeout> sets time in milliseconds to wait for join messages
              (default 50 ms)
          --consensus <timeout> sets time in milliseconds to wait for consensus
-@@ -1325,9 +1325,9 @@ Commands:
+@@ -1358,9 +1358,9 @@ Commands:
  
      import-cman output=<filename> [input=<filename>] [--interactive]
              [output-format=corosync.conf|cluster.conf] [dist=<dist>]
@@ -289,7 +289,7 @@ index 9cbf7de..4a9f2f2 100644
          command can be used.  If --interactive is specified you will be
          prompted to solve incompatibilities manually.  If no input is specified
          /etc/cluster/cluster.conf will be used.  You can force to create output
-@@ -1341,9 +1341,9 @@ Commands:
+@@ -1374,9 +1374,9 @@ Commands:
  
      import-cman output=<filename> [input=<filename>] [--interactive]
              output-format=pcs-commands|pcs-commands-verbose [dist=<dist>]
@@ -303,7 +303,7 @@ index 9cbf7de..4a9f2f2 100644
      export pcs-commands|pcs-commands-verbose [output=<filename>] [dist=<dist>]
          Creates a list of pcs commands which upon execution recreates
 diff --git a/pcsd/views/_dialogs.erb b/pcsd/views/_dialogs.erb
-index d18ac71..21be443 100644
+index d18ac71f..21be443f 100644
 --- a/pcsd/views/_dialogs.erb
 +++ b/pcsd/views/_dialogs.erb
 @@ -40,7 +40,7 @@
@@ -316,10 +316,10 @@ index d18ac71..21be443 100644
  </div>
  
 diff --git a/pcsd/views/manage.erb b/pcsd/views/manage.erb
-index 2b12aaa..4129de5 100644
+index 0f87263e..b4e79225 100644
 --- a/pcsd/views/manage.erb
 +++ b/pcsd/views/manage.erb
-@@ -213,9 +213,9 @@
+@@ -214,9 +214,9 @@
        <tr><td align=center style="color: red" colspan=2"><span id="at_least_one_node_error_msg" style="display:none;">At least one valid node must be entered.</span></td></tr>
        <tr><td align=center style="color: red" colspan=2"><span id="bad_cluster_name_error_msg" style="display:none;">You may not leave the cluster name field blank</span></td></tr>
        <tr><td align=center style="color: red" colspan=2"><span id="addr0_addr1_mismatch_error_msg" style="display:none;">Ring 1 addresses do not match to Ring 0 addresses</span></td></tr>
@@ -331,7 +331,7 @@ index 2b12aaa..4129de5 100644
      </table>
      <span onclick='$(".advanced_open").toggle();$("#advanced_cluster_create_options").toggle();'><span class="advanced_open rightarrow sprites"></span><span class="advanced_open downarrow sprites" style="display:none;"></span>Advanced Options:</span>
      <div id="advanced_cluster_create_options" style="display:none;">
-@@ -248,7 +248,7 @@ remaining 3 nodes will be fenced.
+@@ -249,7 +249,7 @@ remaining 3 nodes will be fenced.
  
  It is very useful when combined with Last Man Standing.
  
@@ -340,7 +340,7 @@ index 2b12aaa..4129de5 100644
  	<% auto_tie_desc = "\
  Enables Auto Tie Breaker (ATB) feature (default: off).
  
-@@ -261,7 +261,7 @@ partition, or the set of nodes that are still in contact with the \
+@@ -262,7 +262,7 @@ partition, or the set of nodes that are still in contact with the \
  node that has the lowest nodeid will remain quorate. The other nodes \
  will be inquorate.
  
@@ -349,7 +349,7 @@ index 2b12aaa..4129de5 100644
  	<% last_man_desc = "\
  Enables Last Man Standing (LMS) feature (default: off).
  
-@@ -282,18 +282,18 @@ Using the above 8 node cluster example, with LMS enabled the cluster \
+@@ -283,18 +283,18 @@ Using the above 8 node cluster example, with LMS enabled the cluster \
  can retain quorum and continue operating by losing, in a cascade \
  fashion, up to 6 nodes with only 2 remaining active.
  
@@ -371,7 +371,7 @@ index 2b12aaa..4129de5 100644
          <% token_timeout = "\
  Sets time in milliseconds until a token loss is declared after not receiving \
  a token (default: 1000 ms)" %>
-@@ -302,7 +302,7 @@ Sets time in milliseconds used for clusters with at least 3 nodes \
+@@ -303,7 +303,7 @@ Sets time in milliseconds used for clusters with at least 3 nodes \
  as a coefficient for real token timeout calculation \
  (token + (number_of_nodes - 2) * token_coefficient) (default: 650 ms)
  
@@ -381,10 +381,10 @@ index 2b12aaa..4129de5 100644
  Sets time in milliseconds to wait for join messages (default: 50 ms)" %>
          <% consensus_timeout = "\
 diff --git a/pcsd/views/nodes.erb b/pcsd/views/nodes.erb
-index 3c3aeed..4b03f06 100644
+index 5849b75d..4c7278a6 100644
 --- a/pcsd/views/nodes.erb
 +++ b/pcsd/views/nodes.erb
-@@ -359,7 +359,7 @@
+@@ -363,7 +363,7 @@
        {{/if}}
        {{#if Pcs.is_cman_with_udpu_transport}}
        <tr>
@@ -394,5 +394,5 @@ index 3c3aeed..4b03f06 100644
        {{/if}}
      </table>
 -- 
-1.8.3.1
+2.13.6
 

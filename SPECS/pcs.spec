@@ -1,6 +1,6 @@
 Name: pcs
-Version: 0.9.158
-Release: 6%{?dist}.1
+Version: 0.9.162
+Release: 5%{?dist}
 License: GPLv2
 URL: https://github.com/ClusterLabs/pcs
 Group: System Environment/Base
@@ -8,51 +8,55 @@ Summary: Pacemaker Configuration System
 #building only for architectures with pacemaker and corosync available
 ExclusiveArch: i686 x86_64 s390x ppc64le
 
+%global pcs_snmp_pkg_name  pcs-snmp
+%global pyagentx_version   0.4.pcs.1
+%global bundled_lib_dir    pcs/bundled
+%global pyagentx_dir       %{bundled_lib_dir}/pyagentx
+
 #part after last slash is recognized as filename in look-aside repository
 #desired name is achived by trick with hash anchor
 Source0: %{url}/archive/%{version}.tar.gz#/%{name}-%{version}.tar.gz
 Source1: HAM-logo.png
 Source2: pcsd-bundle-config-1
 
-Source11: https://rubygems.org/downloads/backports-3.6.8.gem
-Source12: https://rubygems.org/downloads/multi_json-1.12.1.gem
+Source11: https://rubygems.org/downloads/backports-3.9.1.gem
+Source12: https://rubygems.org/downloads/multi_json-1.12.2.gem
 Source13: https://rubygems.org/downloads/open4-1.3.4.gem
 Source14: https://rubygems.org/downloads/orderedhash-0.0.6.gem
 Source15: https://rubygems.org/downloads/rack-protection-1.5.3.gem
-Source16: https://rubygems.org/downloads/rack-test-0.6.3.gem
+Source16: https://rubygems.org/downloads/rack-test-0.7.0.gem
 Source17: https://rubygems.org/downloads/rack-1.6.4.gem
 Source18: https://rubygems.org/downloads/rpam-ruby19-1.2.1.gem
 Source19: https://rubygems.org/downloads/sinatra-contrib-1.4.7.gem
 Source20: https://rubygems.org/downloads/sinatra-1.4.8.gem
-Source21: https://rubygems.org/downloads/tilt-2.0.6.gem
+Source21: https://rubygems.org/downloads/tilt-2.0.8.gem
 Source22: https://rubygems.org/downloads/ethon-0.10.1.gem
-Source23: https://rubygems.org/downloads/ffi-1.9.17.gem
+Source23: https://rubygems.org/downloads/ffi-1.9.18.gem
 
 Source31: https://github.com/testing-cabal/mock/archive/1.0.1.tar.gz#/mock-1.0.1.tar.gz
-Source99: favicon.ico
-
-Patch0: bz1176018-01-remote-guest-nodes-crashes-fixed.patch
-Patch1: bz1373614-01-return-1-when-pcsd-is-unable-to-bind.patch
-Patch2: bz1386114-01-fix-a-crash-in-adding-a-remote-node.patch
-Patch3: bz1284404-01-web-UI-fix-creating-a-new-cluster.patch
-Patch4: bz1165821-01-pcs-CLI-GUI-should-be-capable-of.patch
-Patch5: bz1176018-02-pcs-pcsd-should-be-able-to-config.patch
-Patch6: bz1386114-02-deal-with-f-corosync_conf-if-create-remote-res.patch
-Patch7: bz1176018-03-don-t-call-remove-guest-node-when-f-is-used.patch
-Patch8: bz1165821-02-pcs-CLI-GUI-should-be-capable-of.patch
-Patch9: bz1447910-01-bundle-resources-are-missing-meta-attributes.patch
-Patch10: bz1433016-02-make-container-type-mandatory-in-bundle-create.patch
-Patch11: bz1284404-02-web-ui-fix-timeout-when-cluster-setup-takes-long.patch
-Patch12: bz1458153-01-give-back-orig.-master-behav.-resource-create.patch
-Patch13: bz1459503-01-OSP-workarounds-not-compatible-wi.patch
-Patch14: bz1507399-01-Make-resource-update-idempotent-with-remote-node.patch
-
+Source41: https://github.com/ondrejmular/pyagentx/archive/v%{pyagentx_version}.tar.gz#/pyagentx-%{pyagentx_version}.tar.gz
+Patch1: fix-skip-offline-in-pcs-quorum-device-remove.patch
+Patch2: bz1367808-01-fix-formating-of-assertion-error-in-snmp.patch
+Patch3: bz1367808-02-change-snmp-agent-logfile-path.patch
+Patch4: bz1421702-01-gui-allow-forcing-resource-stonith-create-update.patch
+Patch5: bz1522813-01-fix-a-crash-when-wait-is-used-in-stonith-create.patch
+Patch6: bz1523378-01-warn-when-a-stonith-device-has-method-cycle-set.patch
+Patch7: bz1464781-01-fix-exit-code-when-adding-a-remote-or-guest-node.patch
+Patch8: bz1527530-01-fix-a-crash-in-pcs-booth-sync.patch
+Patch9: bz1415197-01-fix-pcs-cluster-auth.patch
+Patch10: bz1415197-02-fix-pcs-cluster-auth.patch
+Patch98: bz1458153-01-give-back-orig.-master-behav.-resource-create.patch
+Patch99: bz1459503-01-OSP-workarounds-not-compatible-wi.patch
 Patch100: rhel7.patch
+#next patch is needed for situation when the rhel6 cluster is controlled from
+#rhel7 gui
 Patch101: change-cman-to-rhel6-in-messages.patch
 Patch102: show-only-warning-when-crm_mon-xml-is-invalid.patch
 
 # git for patches
 BuildRequires: git
+#printf from coreutils is used in makefile
+BuildRequires: coreutils
 # python for pcs
 BuildRequires: python
 BuildRequires: python-devel
@@ -130,6 +134,25 @@ Provides: bundled(rubygem-ffi) = 1.9.17
 pcs is a corosync and pacemaker configuration tool.  It permits users to
 easily view, modify and create pacemaker based clusters.
 
+# pcs-snmp package definition
+%package -n %{pcs_snmp_pkg_name}
+Group: System Environment/Base
+Summary: Pacemaker cluster SNMP agent
+License: GPLv2, BSD 2-clause
+URL: https://github.com/ClusterLabs/pcs
+
+# tar for unpacking pyagetx source tar ball
+BuildRequires: tar
+
+Requires: pcs = %{version}-%{release}
+Requires: pacemaker
+Requires: net-snmp
+
+Provides: bundled(pyagentx) = %{pyagentx_version}
+
+%description -n %{pcs_snmp_pkg_name}
+SNMP agent that provides information about pacemaker cluster to the master agent (snmpd)
+
 %define PCS_PREFIX /usr
 %prep
 %autosetup -p1 -S git
@@ -147,7 +170,6 @@ UpdateTimestamps() {
     touch -r $PatchFile $f
   done
 }
-UpdateTimestamps -p1 %{PATCH0}
 UpdateTimestamps -p1 %{PATCH1}
 UpdateTimestamps -p1 %{PATCH2}
 UpdateTimestamps -p1 %{PATCH3}
@@ -158,10 +180,8 @@ UpdateTimestamps -p1 %{PATCH7}
 UpdateTimestamps -p1 %{PATCH8}
 UpdateTimestamps -p1 %{PATCH9}
 UpdateTimestamps -p1 %{PATCH10}
-UpdateTimestamps -p1 %{PATCH11}
-UpdateTimestamps -p1 %{PATCH12}
-UpdateTimestamps -p1 %{PATCH13}
-UpdateTimestamps -p1 %{PATCH14}
+UpdateTimestamps -p1 %{PATCH98}
+UpdateTimestamps -p1 %{PATCH99}
 UpdateTimestamps -p1 %{PATCH100}
 UpdateTimestamps -p1 %{PATCH101}
 UpdateTimestamps -p1 %{PATCH102}
@@ -188,7 +208,12 @@ cp -f %SOURCE22 pcsd/vendor/cache
 cp -f %SOURCE23 pcsd/vendor/cache
 #ruby gems copied
 
-cp -f %SOURCE99 pcsd/public
+mkdir -p %{bundled_lib_dir}
+tar -xzf %SOURCE41 -C %{bundled_lib_dir}
+mv %{bundled_lib_dir}/pyagentx-%{pyagentx_version} %{pyagentx_dir}
+cp %{pyagentx_dir}/LICENSE.txt pyagentx_LICENSE.txt
+cp %{pyagentx_dir}/CONTRIBUTORS.txt pyagentx_CONTRIBUTORS.txt
+cp %{pyagentx_dir}/README.md pyagentx_README.md
 
 %build
 
@@ -199,14 +224,19 @@ make install \
   DESTDIR=$RPM_BUILD_ROOT \
   PYTHON_SITELIB=%{python_sitelib} \
   PREFIX=%{PCS_PREFIX} \
-  BASH_COMPLETION_DIR=$RPM_BUILD_ROOT/usr/share/bash-completion/completions
+  BASH_COMPLETION_DIR=$RPM_BUILD_ROOT/usr/share/bash-completion/completions \
+  PYAGENTX_DIR=`readlink -f %{pyagentx_dir}` \
+  SYSTEMCTL_OVERRIDE=true
+
+#SYSTEMCTL_OVERRIDE enforces systemd to be used and skip autodetection
 make install_pcsd \
   DESTDIR=$RPM_BUILD_ROOT \
   PYTHON_SITELIB=%{python_sitelib} \
   hdrdir="%{_includedir}" \
   rubyhdrdir="%{_includedir}" \
   includedir="%{_includedir}" \
-  PREFIX=%{PCS_PREFIX}
+  PREFIX=%{PCS_PREFIX} \
+  SYSTEMCTL_OVERRIDE=true
 
 #after the ruby gem compilation we do not need ruby gems in the cache
 rm -r -v $RPM_BUILD_ROOT%{PCS_PREFIX}/lib/pcsd/vendor/cache
@@ -249,6 +279,40 @@ run_all_tests(){
   #Red Hat Enterprise Linux Server release 7.4 Beta (Maipo)
   ## crm_resource --show-metadata systemd:nonexistent@some:thingxxx
   #error: crm_abort:  systemd_unit_exec: Triggered fatal assert at systemd.c:676 : systemd_init()
+  #
+  #**************************************************************
+  #
+  #pcs.lib.commands.test.test_stonith.Create.test_minimal_success
+  #--------------------------------------------------------------
+  #This tests fails only with live build on i686. Live build was tried twice.
+  #Architectures x86_64 and s390x succeeded, ppc64le was skipped with live
+  #build. Test succeeded with scratch build on i686.
+  #
+  #======================================================================
+  #ERROR: test_minimal_success (pcs.lib.commands.test.test_stonith.Create)
+  #----------------------------------------------------------------------
+  #Traceback (most recent call last):
+  #  File "/builddir/build/BUILDROOT/pcs-0.9.162-3.el7.i386/usr/lib/python2.7/site-packages/pcs/lib/commands/test/test_stonith.py", line 71, in test_minimal_success
+  #    instance_attributes={"must-set": "value"}
+  #  File "/builddir/build/BUILDROOT/pcs-0.9.162-3.el7.i386/usr/lib/python2.7/site-packages/pcs/lib/commands/stonith.py", line 77, in create
+  #    resource_type="stonith"
+  #  File "/builddir/build/BUILDROOT/pcs-0.9.162-3.el7.i386/usr/lib/python2.7/site-packages/pcs/lib/cib/resource/primitive.py", line 78, in create
+  #    allow_invalid=allow_invalid_instance_attributes,
+  #  File "/builddir/build/BUILDROOT/pcs-0.9.162-3.el7.i386/usr/lib/python2.7/site-packages/pcs/lib/resource_agent.py", line 871, in validate_parameters
+  #    update=update
+  #  File "/builddir/build/BUILDROOT/pcs-0.9.162-3.el7.i386/usr/lib/python2.7/site-packages/pcs/lib/resource_agent.py", line 486, in validate_parameters
+  #    parameters
+  #  File "/builddir/build/BUILDROOT/pcs-0.9.162-3.el7.i386/usr/lib/python2.7/site-packages/pcs/lib/resource_agent.py", line 518, in validate_parameters_values
+  #    agent_params = self.get_parameters()
+  #  File "/builddir/build/BUILDROOT/pcs-0.9.162-3.el7.i386/usr/lib/python2.7/site-packages/pcs/lib/resource_agent.py", line 858, in get_parameters
+  #    self._get_stonithd_metadata().get_parameters()
+  #  File "/builddir/build/BUILDROOT/pcs-0.9.162-3.el7.i386/usr/lib/python2.7/site-packages/pcs/lib/resource_agent.py", line 437, in get_parameters
+  #    params_element = self._get_metadata().find("parameters")
+  #  File "/builddir/build/BUILDROOT/pcs-0.9.162-3.el7.i386/usr/lib/python2.7/site-packages/pcs/lib/resource_agent.py", line 596, in _get_metadata
+  #    self._metadata = self._parse_metadata(self._load_metadata())
+  #  File "/builddir/build/BUILDROOT/pcs-0.9.162-3.el7.i386/usr/lib/python2.7/site-packages/pcs/lib/resource_agent.py", line 668, in _load_metadata
+  #    [settings.stonithd_binary, "metadata"]
+  #ValueError: need more than 0 values to unpack
 
   export PYTHONPATH="${PYTHONPATH}:${sitelib}"
   easy_install -d ${sitelib} %SOURCE31
@@ -256,6 +320,10 @@ run_all_tests(){
     pcs.test.test_cluster.ClusterTest.testUIDGID \
     pcs.test.test_stonith.StonithTest.test_stonith_create_provides_unfencing \
     pcs.test.cib_resource.test_create.Success.test_base_create_with_agent_name_including_systemd_instance \
+    pcs.lib.commands.test.test_stonith.Create.test_minimal_success \
+    pcs.lib.commands.test.test_stonith.Create.test_minimal_wait_ok_run_ok \
+    pcs.lib.commands.test.test_stonith.CreateInGroup.test_minimal_success \
+    pcs.lib.commands.test.test_stonith.CreateInGroup.test_minimal_wait_ok_run_ok \
 
   test_result_python=$?
 
@@ -290,11 +358,20 @@ run_all_tests
 %post
 %systemd_post pcsd.service
 
+%post -n %{pcs_snmp_pkg_name}
+%systemd_post pcs_snmp_agent.service
+
 %preun
 %systemd_preun pcsd.service
 
+%preun -n %{pcs_snmp_pkg_name}
+%systemd_preun pcs_snmp_agent.service
+
 %postun
 %systemd_postun_with_restart pcsd.service
+
+%postun -n %{pcs_snmp_pkg_name}
+%systemd_postun_with_restart pcs_snmp_agent.service
 
 %files
 %{python_sitelib}/pcs
@@ -306,8 +383,8 @@ run_all_tests
 /usr/share/bash-completion/completions/pcs
 /var/lib/pcsd
 /etc/pam.d/pcsd
-/etc/logrotate.d/pcsd
 %dir /var/log/pcsd
+%config(noreplace) /etc/logrotate.d/pcsd
 %config(noreplace) /etc/sysconfig/pcsd
 %ghost %config(noreplace) /var/lib/pcsd/cfgsync_ctl
 %ghost %config(noreplace) /var/lib/pcsd/pcsd.cookiesecret
@@ -326,16 +403,51 @@ run_all_tests
 %exclude %{python_sitelib}/pcs/pcs
 
 %doc COPYING
-%doc README
 %doc CHANGELOG.md
 
-%changelog
-* Thu Nov 30 2017 Johnny Hughes <johnny@centos.org>  0.9.158-6.el7_4.1
-- Manually Debreand PCS
+%files -n %{pcs_snmp_pkg_name}
+/usr/lib/pcs/pcs_snmp_agent
+/usr/lib/pcs/bundled/packages/pyagentx*
+/usr/lib/systemd/system/pcs_snmp_agent.service
+/usr/share/snmp/mibs/PCMK-PCS*-MIB.txt
+%{_mandir}/man8/pcs_snmp_agent.*
+%config(noreplace) /etc/sysconfig/pcs_snmp_agent
+%dir /var/log/pcs
+%doc COPYING
+%doc CHANGELOG.md
+%doc pyagentx_LICENSE.txt
+%doc pyagentx_CONTRIBUTORS.txt
+%doc pyagentx_README.md
 
-* Mon Oct 30 2017  Ivan Devat <idevat@redhat.com> - 0.9.158-6.el7_4.1
-- `resurce update` no longer exits with an error when the `remote-node` meta attribute is set to the same value that it already has
-- Resolves: rhbz#1507399
+%changelog
+* Mon Feb 05 2018 Ondrej Mular <omular@redhat.com> - 0.9.162-5
+- Fixed `pcs cluster auth` in a cluster when not authenticated and using a non-default port
+- Fixed `pcs cluster auth` in a cluster when previously authenticated using a non-default port and reauthenticating using an implicit default port
+- Resolves: rhbz#1415197
+
+* Fri Jan 05 2018 Ivan Devat <idevat@redhat.com> - 0.9.162-3
+- Pcs now properly exits with code 1 when an error occurs in pcs cluster node add-remote and pcs cluster node add-guest commands
+- Fixed a crash in the pcs booth sync command
+- Resolves: rhbz#1464781 rhbz#1527530
+
+* Mon Dec 11 2017 Ivan Devat <idevat@redhat.com> - 0.9.162-2
+- Changed snmp agent logfile path
+- It is now possible to set the `action` option of stonith devices in GUI by using force
+- Do not crash when `--wait` is used in `pcs stonith create`
+- A warning is displayed in `pcs status` and a stonith device detail in web UI  when a stonith device has its `method` option set to `cycle`
+- Resolves: rhbz#1367808 rhbz#1421702 rhbz#1522813 rhbz#1523378
+
+* Wed Nov 15 2017 Ondrej Mular <omular@redhat.com> - 0.9.162-1
+- Rebased to latest upstream sources (see CHANGELOG.md)
+- Resolves: rhbz#1389943 rhbz#1389209 rhbz#1506220 rhbz#1508351 rhbz#1415197 rhbz#1506864 rhbz#1367808 rhbz#1499749
+
+* Thu Nov 02 2017 Ivan Devat <idevat@redhat.com> - 0.9.161-1
+- Rebased to latest upstream sources (see CHANGELOG.md)
+- Resolves: rhbz#1499749 rhbz#1415197 rhbz#1501274 rhbz#1502715 rhbz#1230919 rhbz#1503110
+
+* Wed Oct 11 2017 Ivan Devat <idevat@redhat.com> - 0.9.160-1
+- Rebased to latest upstream sources (see CHANGELOG.md)
+- Resolves: rhbz#1499749 rhbz#1443647 rhbz#1432283 rhbz#1421702 rhbz#1443418 rhbz#1464781 rhbz#1435697 rhbz#1441673 rhbz#1420437 rhbz#1388783 rhbz#1463327 rhbz#1418199 rhbz#1341582 rhbz#1489682 rhbz#1491631 rhbz#1213946
 
 * Thu Jun 15 2017 Ivan Devat <idevat@redhat.com> - 0.9.158-6
 - It is now possible to disable, enable, unmanage and manage bundle resources and set their meta attributes
