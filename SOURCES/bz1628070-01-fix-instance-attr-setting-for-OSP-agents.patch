@@ -1,0 +1,207 @@
+From 1ac934ffe7b17bb5a4248e8b2f293815b0bb8a68 Mon Sep 17 00:00:00 2001
+From: Ondrej Mular <omular@redhat.com>
+Date: Fri, 31 Aug 2018 10:12:18 +0200
+Subject: [PATCH] fix allowed instance attrs for some fence agents
+
+Fix is effective only for agents `fence_compute` and `fence_evacuate`
+---
+ pcs/lib/resource_agent.py           | 22 ++++++++++++-
+ pcs/lib/test/test_resource_agent.py | 50 +++++++++++++++++++++++++++++
+ pcs/test/test_stonith.py            | 63 +++++++++++++++++++++++++++++++++++++
+ 3 files changed, 134 insertions(+), 1 deletion(-)
+
+diff --git a/pcs/lib/resource_agent.py b/pcs/lib/resource_agent.py
+index 2f2686dd..e2461329 100644
+--- a/pcs/lib/resource_agent.py
++++ b/pcs/lib/resource_agent.py
+@@ -469,6 +469,14 @@ class Agent(object):
+             "obsoletes": parameter_element.get("obsoletes", None),
+         })
+ 
++    def _get_always_allowed_parameters(self):
++        """
++        This method should be overriden in descendants.
++
++        Returns set of always allowed parameters of a agent.
++        """
++        return set()
++
+     def validate_parameters(
+         self, parameters,
+         parameters_type="resource",
+@@ -518,13 +526,17 @@ class Agent(object):
+         agent_params = self.get_parameters()
+ 
+         required_missing = []
++        always_allowed = self._get_always_allowed_parameters()
+         for attr in agent_params:
+             if attr["required"] and attr["name"] not in parameters_values:
+                 required_missing.append(attr["name"])
+ 
+         valid_attrs = [attr["name"] for attr in agent_params]
+         return (
+-            [attr for attr in parameters_values if attr not in valid_attrs],
++            [
++                attr for attr in parameters_values
++                if attr not in valid_attrs and attr not in always_allowed
++            ],
+             required_missing
+         )
+ 
+@@ -858,6 +870,14 @@ class StonithAgent(CrmAgent):
+             self._get_stonithd_metadata().get_parameters()
+         )
+ 
++    def _get_always_allowed_parameters(self):
++        if self.get_name() in ("fence_compute", "fence_evacuate"):
++            return set([
++                "project-domain", "project_domain", "user-domain",
++                "user_domain", "compute-domain", "compute_domain",
++            ])
++        return set()
++
+     def validate_parameters(
+         self, parameters,
+         parameters_type="stonith",
+diff --git a/pcs/lib/test/test_resource_agent.py b/pcs/lib/test/test_resource_agent.py
+index a8be5fcd..ea579ad4 100644
+--- a/pcs/lib/test/test_resource_agent.py
++++ b/pcs/lib/test/test_resource_agent.py
+@@ -1275,6 +1275,23 @@ class AgentMetadataValidateParametersValuesTest(TestCase):
+             (["obsoletes"], ["deprecated"])
+         )
+ 
++    @patch_agent_object(
++        "_get_always_allowed_parameters",
++        lambda self: set(["always_allowed", "another-one", "last_one"])
++    )
++    def test_always_allowed(self, mock_metadata):
++        mock_metadata.return_value = self.metadata
++        self.assertEqual(
++            self.agent.validate_parameters_values({
++                "another_required_param": "value1",
++                "required_param": "value2",
++                "test_param": "value3",
++                "always_allowed": "value4",
++                "another-one": "value5",
++            }),
++            ([], [])
++        )
++
+ 
+ class AgentMetadataValidateParameters(TestCase):
+     def setUp(self):
+@@ -2175,3 +2192,36 @@ class AbsentResourceAgentTest(TestCase):
+         self.assertEqual(([], []), absent.validate_parameters_values({
+             "whatever": "anything"
+         }))
++
++
++class StonithAgentAlwaysAllowedParametersTest(TestCase):
++    def setUp(self):
++        self.runner = mock.MagicMock(spec_set=CommandRunner)
++        self.always_allowed = set([
++            "project-domain", "project_domain", "user-domain", "user_domain",
++            "compute-domain", "compute_domain",
++        ])
++
++    def test_fence_compute(self):
++        self.assertEquals(
++            self.always_allowed,
++            lib_ra.StonithAgent(
++                self.runner, "fence_compute"
++            )._get_always_allowed_parameters()
++        )
++
++    def test_fence_evacuate(self):
++        self.assertEquals(
++            self.always_allowed,
++            lib_ra.StonithAgent(
++                self.runner, "fence_evacuate"
++            )._get_always_allowed_parameters()
++        )
++
++    def test_some_other_agent(self):
++        self.assertEquals(
++            set(),
++            lib_ra.StonithAgent(
++                self.runner, "fence_dummy"
++            )._get_always_allowed_parameters()
++        )
+diff --git a/pcs/test/test_stonith.py b/pcs/test/test_stonith.py
+index becc1a1c..b7c964bb 100644
+--- a/pcs/test/test_stonith.py
++++ b/pcs/test/test_stonith.py
+@@ -469,6 +469,69 @@ class StonithTest(TestCase, AssertPcsMixin):
+             )
+         )
+ 
++    def test_stonith_compute_evacuate_always_allowed_parameters(self):
++        self.assert_pcs_success(
++            "stonith create test1 fence_compute auth_url=test1 project_domain=val1 project-domain=val2 user_domain=val3 user-domain=val4 compute_domain=val5 compute-domain=val6",
++        )
++        self.assert_pcs_success(
++            "stonith show --full",
++            outdent(
++                """\
++                 Resource: test1 (class=stonith type=fence_compute)
++                  Attributes: auth_url=test1 compute-domain=val6 compute_domain=val5 project-domain=val2 project_domain=val1 user-domain=val4 user_domain=val3
++                  Operations: monitor interval=60s (test1-monitor-interval-60s)
++                """
++            )
++        )
++        self.assert_pcs_success(
++            "stonith create test2 fence_evacuate auth_url=test2 project_domain=val0 project-domain=val1 user_domain=val2 user-domain=val3 compute_domain=val4 compute-domain=val5",
++        )
++        self.assert_pcs_success(
++            "stonith show --full",
++            outdent(
++                """\
++                 Resource: test1 (class=stonith type=fence_compute)
++                  Attributes: auth_url=test1 compute-domain=val6 compute_domain=val5 project-domain=val2 project_domain=val1 user-domain=val4 user_domain=val3
++                  Operations: monitor interval=60s (test1-monitor-interval-60s)
++                 Resource: test2 (class=stonith type=fence_evacuate)
++                  Attributes: auth_url=test2 compute-domain=val5 compute_domain=val4 project-domain=val1 project_domain=val0 user-domain=val3 user_domain=val2
++                  Operations: monitor interval=60s (test2-monitor-interval-60s)
++                """
++            )
++        )
++        self.assert_pcs_success(
++            "stonith update test1 auth_url=new0 project_domain=new1 project-domain=new2 user_domain=new3 user-domain=new4 compute_domain=new5 compute-domain=new6",
++        )
++        self.assert_pcs_success(
++            "stonith show --full",
++            outdent(
++                """\
++                 Resource: test1 (class=stonith type=fence_compute)
++                  Attributes: auth_url=new0 compute-domain=new6 compute_domain=new5 project-domain=new2 project_domain=new1 user-domain=new4 user_domain=new3
++                  Operations: monitor interval=60s (test1-monitor-interval-60s)
++                 Resource: test2 (class=stonith type=fence_evacuate)
++                  Attributes: auth_url=test2 compute-domain=val5 compute_domain=val4 project-domain=val1 project_domain=val0 user-domain=val3 user_domain=val2
++                  Operations: monitor interval=60s (test2-monitor-interval-60s)
++                """
++            )
++        )
++        self.assert_pcs_success(
++            "stonith update test2 auth_url=new1 project_domain=new2 project-domain=new3 user_domain=new4 user-domain=new5 compute_domain=new6 compute-domain=new7",
++        )
++        self.assert_pcs_success(
++            "stonith show --full",
++            outdent(
++                """\
++                 Resource: test1 (class=stonith type=fence_compute)
++                  Attributes: auth_url=new0 compute-domain=new6 compute_domain=new5 project-domain=new2 project_domain=new1 user-domain=new4 user_domain=new3
++                  Operations: monitor interval=60s (test1-monitor-interval-60s)
++                 Resource: test2 (class=stonith type=fence_evacuate)
++                  Attributes: auth_url=new1 compute-domain=new7 compute_domain=new6 project-domain=new3 project_domain=new2 user-domain=new5 user_domain=new4
++                  Operations: monitor interval=60s (test2-monitor-interval-60s)
++                """
++            )
++        )
++
+     def testStonithFenceConfirm(self):
+         output, returnVal = pcs(temp_cib, "stonith fence blah blah")
+         assert returnVal == 1
+-- 
+2.13.6
+
