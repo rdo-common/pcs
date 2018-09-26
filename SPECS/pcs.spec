@@ -35,6 +35,8 @@ Source23: https://rubygems.org/downloads/ffi-1.9.18.gem
 
 Source31: https://github.com/testing-cabal/mock/archive/1.0.1.tar.gz#/mock-1.0.1.tar.gz
 Source41: https://github.com/ondrejmular/pyagentx/archive/v%{pyagentx_version}.tar.gz#/pyagentx-%{pyagentx_version}.tar.gz
+Source99: favicon.ico
+
 Patch1: fix-skip-offline-in-pcs-quorum-device-remove.patch
 Patch2: bz1367808-01-fix-formating-of-assertion-error-in-snmp.patch
 Patch3: bz1367808-02-change-snmp-agent-logfile-path.patch
@@ -222,6 +224,7 @@ mv %{bundled_lib_dir}/pyagentx-%{pyagentx_version} %{pyagentx_dir}
 cp %{pyagentx_dir}/LICENSE.txt pyagentx_LICENSE.txt
 cp %{pyagentx_dir}/CONTRIBUTORS.txt pyagentx_CONTRIBUTORS.txt
 cp %{pyagentx_dir}/README.md pyagentx_README.md
+cp -f %SOURCE99 pcsd/public
 
 %build
 
@@ -428,6 +431,9 @@ run_all_tests
 %doc pyagentx_README.md
 
 %changelog
+* Wed Sep 26 2018 Johnny Hughes <johnny@centos.org> - 0.9.162-5.el7_5.2
+- Manual Debranding
+
 * Wed Sep 12 2018 Ondrej Mular <omular@redhat.com> - 0.9.162-5.el7_5.2
 - Fix instance attributes setting for fence agents `fence_compute` and `fence_evacuate`
 - Resolves: rhbz#1628070
