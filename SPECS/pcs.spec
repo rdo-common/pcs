@@ -1,12 +1,12 @@
 Name: pcs
-Version: 0.9.162
-Release: 5%{?dist}.2
+Version: 0.9.165
+Release: 6%{?dist}
 License: GPLv2
 URL: https://github.com/ClusterLabs/pcs
 Group: System Environment/Base
 Summary: Pacemaker Configuration System
 #building only for architectures with pacemaker and corosync available
-ExclusiveArch: i686 x86_64 s390x ppc64le
+ExclusiveArch: i686 x86_64 s390x ppc64le aarch64
 
 %global pcs_snmp_pkg_name  pcs-snmp
 %global pyagentx_version   0.4.pcs.1
@@ -19,45 +19,39 @@ Source0: %{url}/archive/%{version}.tar.gz#/%{name}-%{version}.tar.gz
 Source1: HAM-logo.png
 Source2: pcsd-bundle-config-1
 
-Source11: https://rubygems.org/downloads/backports-3.9.1.gem
-Source12: https://rubygems.org/downloads/multi_json-1.12.2.gem
+Source11: https://rubygems.org/downloads/backports-3.11.3.gem
+Source12: https://rubygems.org/downloads/multi_json-1.13.1.gem
 Source13: https://rubygems.org/downloads/open4-1.3.4.gem
 Source14: https://rubygems.org/downloads/orderedhash-0.0.6.gem
 Source15: https://rubygems.org/downloads/rack-protection-1.5.5.gem
 Source16: https://rubygems.org/downloads/rack-test-0.7.0.gem
-Source17: https://rubygems.org/downloads/rack-1.6.4.gem
+Source17: https://rubygems.org/downloads/rack-1.6.10.gem
 Source18: https://rubygems.org/downloads/rpam-ruby19-1.2.1.gem
 Source19: https://rubygems.org/downloads/sinatra-contrib-1.4.7.gem
 Source20: https://rubygems.org/downloads/sinatra-1.4.8.gem
 Source21: https://rubygems.org/downloads/tilt-2.0.8.gem
-Source22: https://rubygems.org/downloads/ethon-0.10.1.gem
-Source23: https://rubygems.org/downloads/ffi-1.9.18.gem
+Source22: https://rubygems.org/downloads/ethon-0.11.0.gem
+Source23: https://rubygems.org/downloads/ffi-1.9.25.gem
 
 Source31: https://github.com/testing-cabal/mock/archive/1.0.1.tar.gz#/mock-1.0.1.tar.gz
 Source41: https://github.com/ondrejmular/pyagentx/archive/v%{pyagentx_version}.tar.gz#/pyagentx-%{pyagentx_version}.tar.gz
-Source99: favicon.ico
 
-Patch1: fix-skip-offline-in-pcs-quorum-device-remove.patch
-Patch2: bz1367808-01-fix-formating-of-assertion-error-in-snmp.patch
-Patch3: bz1367808-02-change-snmp-agent-logfile-path.patch
-Patch4: bz1421702-01-gui-allow-forcing-resource-stonith-create-update.patch
-Patch5: bz1522813-01-fix-a-crash-when-wait-is-used-in-stonith-create.patch
-Patch6: bz1523378-01-warn-when-a-stonith-device-has-method-cycle-set.patch
-Patch7: bz1464781-01-fix-exit-code-when-adding-a-remote-or-guest-node.patch
-Patch8: bz1527530-01-fix-a-crash-in-pcs-booth-sync.patch
-Patch9: bz1415197-01-fix-pcs-cluster-auth.patch
-Patch10: bz1415197-02-fix-pcs-cluster-auth.patch
+Patch1: bz1462248-01-fix-error-for-an-inaccessible-resource-in-a-bundle.patch
+Patch2: bz1572886-01-fix-syntax-multiple-except.-as-parenthes.-tuple.patch
+Patch3: bz1475318-01-rfe-validate-nodes-watchdog-device-by-using-sbd.patch
+Patch4: bz1599758-01-fix-node-communicator-getter.patch
+Patch5: bz1600169-01-disable-usage-of-Expect-HTTP-header.patch
+Patch6: bz1488044-01-fix-pcs-cluster-cib-push-for-old-feature-set.patch
+Patch7: bz1475318-02-rfe-validate-nodes-watchdog-device-by-using-sbd.patch
+Patch8: bz1623181-01-fix-instance-attr-setting-for-OSP-agents.patch
+
 Patch98: bz1458153-01-give-back-orig.-master-behav.-resource-create.patch
 Patch99: bz1459503-01-OSP-workarounds-not-compatible-wi.patch
-Patch100: rhel7.patch
+Patch100: adapt-working-with-gems-to-rhel-7.patch
 #next patch is needed for situation when the rhel6 cluster is controlled from
 #rhel7 gui
 Patch101: change-cman-to-rhel6-in-messages.patch
 Patch102: show-only-warning-when-crm_mon-xml-is-invalid.patch
-Patch103: bz1557253-01-get-rid-of-debug-when-calling-local-pcsd.patch
-Patch104: bz1557253-02-sanitize-path-when-saving-booth-config-files.patch
-Patch105: bz1557253-03-use-rubygem-rack-protection-1.5.5.patch
-Patch106: bz1628070-01-fix-instance-attr-setting-for-OSP-agents.patch
 
 # git for patches
 BuildRequires: git
@@ -122,19 +116,19 @@ Requires(postun): systemd
 Requires: liberation-sans-fonts
 Requires: overpass-fonts
 
-Provides: bundled(rubygem-backports) = 3.6.8
-Provides: bundled(rubygem-multi_json) = 1.12.1
+Provides: bundled(rubygem-backports) = 3.11.3
+Provides: bundled(rubygem-multi_json) = 1.13.1
 Provides: bundled(rubygem-open4) = 1.3.4
 Provides: bundled(rubygem-orderedhash) = 0.0.6
-Provides: bundled(rubygem-rack) = 1.6.4
+Provides: bundled(rubygem-rack) = 1.6.10
 Provides: bundled(rubygem-rack-protection) = 1.5.5
 Provides: bundled(rubygem-rack-test) = 0.6.3
 Provides: bundled(rubygem-rpam-ruby19) = 1.2.1
 Provides: bundled(rubygem-sinatra) = 1.4.8
 Provides: bundled(rubygem-sinatra-contrib) = 1.4.7
 Provides: bundled(rubygem-tilt) = 2.0.6
-Provides: bundled(rubygem-ethon) = 0.10.1
-Provides: bundled(rubygem-ffi) = 1.9.17
+Provides: bundled(rubygem-ethon) = 0.11.0
+Provides: bundled(rubygem-ffi) = 1.9.25
 
 %description
 pcs is a corosync and pacemaker configuration tool.  It permits users to
@@ -144,7 +138,7 @@ easily view, modify and create pacemaker based clusters.
 %package -n %{pcs_snmp_pkg_name}
 Group: System Environment/Base
 Summary: Pacemaker cluster SNMP agent
-License: GPLv2, BSD 2-clause
+License: GPLv2 and BSD-2-Clause
 URL: https://github.com/ClusterLabs/pcs
 
 # tar for unpacking pyagetx source tar ball
@@ -184,17 +178,12 @@ UpdateTimestamps -p1 %{PATCH5}
 UpdateTimestamps -p1 %{PATCH6}
 UpdateTimestamps -p1 %{PATCH7}
 UpdateTimestamps -p1 %{PATCH8}
-UpdateTimestamps -p1 %{PATCH9}
-UpdateTimestamps -p1 %{PATCH10}
+
 UpdateTimestamps -p1 %{PATCH98}
 UpdateTimestamps -p1 %{PATCH99}
 UpdateTimestamps -p1 %{PATCH100}
 UpdateTimestamps -p1 %{PATCH101}
 UpdateTimestamps -p1 %{PATCH102}
-UpdateTimestamps -p1 %{PATCH103}
-UpdateTimestamps -p1 %{PATCH104}
-UpdateTimestamps -p1 %{PATCH105}
-UpdateTimestamps -p1 %{PATCH106}
 
 cp -f %SOURCE1 pcsd/public/images
 
@@ -224,7 +213,6 @@ mv %{bundled_lib_dir}/pyagentx-%{pyagentx_version} %{pyagentx_dir}
 cp %{pyagentx_dir}/LICENSE.txt pyagentx_LICENSE.txt
 cp %{pyagentx_dir}/CONTRIBUTORS.txt pyagentx_CONTRIBUTORS.txt
 cp %{pyagentx_dir}/README.md pyagentx_README.md
-cp -f %SOURCE99 pcsd/public
 
 %build
 
@@ -324,6 +312,35 @@ run_all_tests(){
   #  File "/builddir/build/BUILDROOT/pcs-0.9.162-3.el7.i386/usr/lib/python2.7/site-packages/pcs/lib/resource_agent.py", line 668, in _load_metadata
   #    [settings.stonithd_binary, "metadata"]
   #ValueError: need more than 0 values to unpack
+  #
+  #
+  # ======================================================================
+  # FAIL: test_succes_model_options_and_heuristics (pcs.test.test_quorum.DeviceAddTest)
+  # ----------------------------------------------------------------------
+  # Traceback (most recent call last):
+  #   File "/builddir/build/BUILDROOT/pcs-0.9.165-1.el7.s390x/usr/lib/python2.7/site-packages/pcs/test/test_quorum.py", line 179, in test_succes_model_options_and_heuristics
+  #     "quorum device add model net host=127.0.0.1 algorithm=ffsplit "
+  #   File "/builddir/build/BUILDROOT/pcs-0.9.165-1.el7.s390x/usr/lib/python2.7/site-packages/pcs/test/tools/assertions.py", line 82, in assert_pcs_success
+  #     returncode=0
+  #   File "/builddir/build/BUILDROOT/pcs-0.9.165-1.el7.s390x/usr/lib/python2.7/site-packages/pcs/test/tools/assertions.py", line 129, in assert_pcs_result
+  #     ).format(returncode, pcs_returncode, command, stdout)
+  # AssertionError: Expected return code "0", but was "-13"
+  # command: quorum device add model net host=127.0.0.1 algorithm=ffsplit heuristics mode=on 'exec_ls=test -f /tmp/test'
+  # stdout:
+  # ======================================================================
+  # FAIL: test_succes_model_options_and_heuristics_no_exec (pcs.test.test_quorum.DeviceAddTest)
+  # ----------------------------------------------------------------------
+  # Traceback (most recent call last):
+  #   File "/builddir/build/BUILDROOT/pcs-0.9.165-1.el7.s390x/usr/lib/python2.7/site-packages/pcs/test/test_quorum.py", line 202, in test_succes_model_options_and_heuristics_no_exec
+  #     "Warning: No exec_NAME options are specified, so heuristics are "
+  #   File "/builddir/build/BUILDROOT/pcs-0.9.165-1.el7.s390x/usr/lib/python2.7/site-packages/pcs/test/tools/assertions.py", line 82, in assert_pcs_success
+  #     returncode=0
+  #   File "/builddir/build/BUILDROOT/pcs-0.9.165-1.el7.s390x/usr/lib/python2.7/site-packages/pcs/test/tools/assertions.py", line 129, in assert_pcs_result
+  #     ).format(returncode, pcs_returncode, command, stdout)
+  # AssertionError: Expected return code "0", but was "-13"
+  # command: quorum device add model net host=127.0.0.1 algorithm=ffsplit heuristics mode=on
+  # stdout:
+  # ----------------------------------------------------------------------
 
   export PYTHONPATH="${PYTHONPATH}:${sitelib}"
   easy_install -d ${sitelib} %SOURCE31
@@ -335,6 +352,8 @@ run_all_tests(){
     pcs.lib.commands.test.test_stonith.Create.test_minimal_wait_ok_run_ok \
     pcs.lib.commands.test.test_stonith.CreateInGroup.test_minimal_success \
     pcs.lib.commands.test.test_stonith.CreateInGroup.test_minimal_wait_ok_run_ok \
+    pcs.test.test_quorum.DeviceAddTest.test_succes_model_options_and_heuristics \
+    pcs.test.test_quorum.DeviceAddTest.test_succes_model_options_and_heuristics_no_exec \
 
   test_result_python=$?
 
@@ -431,12 +450,41 @@ run_all_tests
 %doc pyagentx_README.md
 
 %changelog
-* Wed Sep 26 2018 Johnny Hughes <johnny@centos.org> - 0.9.162-5.el7_5.2
-- Manual Debranding
+* Fri Aug 31 2018 Ondrej Mular <omular@redhat.com> - 0.9.165-6
+- Fix instance attributes setting for fence agents `fence_compute` and
+  `fence_evacuate`
+- Resolves: rhbz#1623181
 
-* Wed Sep 12 2018 Ondrej Mular <omular@redhat.com> - 0.9.162-5.el7_5.2
-- Fix instance attributes setting for fence agents `fence_compute` and `fence_evacuate`
-- Resolves: rhbz#1628070
+* Tue Aug 28 2018 Ondrej Mular <omular@redhat.com> - 0.9.165-5
+- Fixed `pcs stonith sbd watchdog test` error messages
+- Fixed avaliable watchdog devices listing
+- Resolves: rhbz#1475318
+
+* Thu Aug 16 2018 Ondrej Mular <omular@redhat.com> - 0.9.165-4
+- Fixed `pcs cluster cib-push` for old crm_feature_set
+- Resolves: rhbz#1488044
+
+* Mon Aug 06 2018 Ivan Devat <idevat@redhat.com> - 0.9.165-3
+- Fixed unhandled exception during a start support check
+- Resolves: rhbz#1572886
+
+* Mon Jul 23 2018 Ivan Devat <idevat@redhat.com> - 0.9.165-2
+- Fixed validation for an unaccessible resource inside a bundle 
+- Fixed test of watchdog devices
+- Fixed command `pcs cluster node add-outside`
+- Fixed large key files distribution
+- Resolves: rhbz#1462248 rhbz#1475318 rhbz#1599758 rhbz#1600169
+
+* Fri Jun 22 2018 Ivan Devat <idevat@redhat.com> - 0.9.165-1
+- Rebased to latest upstream sources (see CHANGELOG.md)
+- Resolves: rhbz#1572886 rhbz#1581150 rhbz#1579911 rhbz#1533849 rhbz#1557252 rhbz#1568353 rhbz#1574898 rhbz#1427273 rhbz#1475318 rhbz#1476862 rhbz#1535967 rhbz#1566382 rhbz#1588667 rhbz#1590533 rhbz#1403832 rhbz#1517333 rhbz#1529508 
+
+* Fri Apr 27 2018 Ivan Devat <idevat@redhat.com> - 0.9.162-7
+- Fixed license tag in specfile
+
+* Fri Apr 27 2018 Ivan Devat <idevat@redhat.com> - 0.9.162-6
+- Added aarch64
+- Resolves: rhbz#1568291
 
 * Wed Mar 21 2018 Ondrej Mular <omular@redhat.com> - 0.9.162-5.el7_5.1
 - Fixed CVE-2018-1086 pcs: Debug parameter removal bypass, allowing information disclosure

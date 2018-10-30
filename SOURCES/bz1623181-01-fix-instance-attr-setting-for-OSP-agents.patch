@@ -1,4 +1,4 @@
-From 1ac934ffe7b17bb5a4248e8b2f293815b0bb8a68 Mon Sep 17 00:00:00 2001
+From b52c3ed9ec342b021357b915eaf6581f9f6a57d2 Mon Sep 17 00:00:00 2001
 From: Ondrej Mular <omular@redhat.com>
 Date: Fri, 31 Aug 2018 10:12:18 +0200
 Subject: [PATCH] fix allowed instance attrs for some fence agents
@@ -11,7 +11,7 @@ Fix is effective only for agents `fence_compute` and `fence_evacuate`
  3 files changed, 134 insertions(+), 1 deletion(-)
 
 diff --git a/pcs/lib/resource_agent.py b/pcs/lib/resource_agent.py
-index 2f2686dd..e2461329 100644
+index 34b18b9b..447cf1fe 100644
 --- a/pcs/lib/resource_agent.py
 +++ b/pcs/lib/resource_agent.py
 @@ -469,6 +469,14 @@ class Agent(object):
@@ -64,7 +64,7 @@ index 2f2686dd..e2461329 100644
          self, parameters,
          parameters_type="stonith",
 diff --git a/pcs/lib/test/test_resource_agent.py b/pcs/lib/test/test_resource_agent.py
-index a8be5fcd..ea579ad4 100644
+index 4ec94e26..2396bf30 100644
 --- a/pcs/lib/test/test_resource_agent.py
 +++ b/pcs/lib/test/test_resource_agent.py
 @@ -1275,6 +1275,23 @@ class AgentMetadataValidateParametersValuesTest(TestCase):
@@ -129,7 +129,7 @@ index a8be5fcd..ea579ad4 100644
 +            )._get_always_allowed_parameters()
 +        )
 diff --git a/pcs/test/test_stonith.py b/pcs/test/test_stonith.py
-index becc1a1c..b7c964bb 100644
+index cdb2ecee..ff981acc 100644
 --- a/pcs/test/test_stonith.py
 +++ b/pcs/test/test_stonith.py
 @@ -469,6 +469,69 @@ class StonithTest(TestCase, AssertPcsMixin):

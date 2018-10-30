@@ -1,7 +1,7 @@
-From fe7151898fed1b6383a49db26426c3f23c5ff7f2 Mon Sep 17 00:00:00 2001
+From 4d6997edab3c3e478fb0d73e0dc6dc2a924ed664 Mon Sep 17 00:00:00 2001
 From: Ivan Devat <idevat@redhat.com>
 Date: Mon, 5 Jun 2017 17:13:41 +0200
-Subject: [PATCH] give back orig. --master behav. (resource create)
+Subject: [PATCH 1/5] give back orig. --master behav. (resource create)
 
 ---
  pcs/cli/common/parse_args.py           |   8 +-
@@ -14,7 +14,7 @@ Subject: [PATCH] give back orig. --master behav. (resource create)
  7 files changed, 228 insertions(+), 59 deletions(-)
 
 diff --git a/pcs/cli/common/parse_args.py b/pcs/cli/common/parse_args.py
-index 70b926c0..d3151043 100644
+index 7d6f6006..5c709245 100644
 --- a/pcs/cli/common/parse_args.py
 +++ b/pcs/cli/common/parse_args.py
 @@ -299,7 +299,13 @@ def upgrade_args(arg_list):
@@ -87,7 +87,7 @@ index efe38d0e..900094c9 100644
              ],
              upgrade_args([
 diff --git a/pcs/resource.py b/pcs/resource.py
-index 082bd9d1..6637f806 100644
+index c605cc6a..cdba2bfd 100644
 --- a/pcs/resource.py
 +++ b/pcs/resource.py
 @@ -384,6 +384,25 @@ def resource_create(lib, argv, modifiers):
@@ -117,7 +117,7 @@ index 082bd9d1..6637f806 100644
      defined_options = [opt for opt in parts_sections if opt in parts]
      if modifiers["group"]:
 diff --git a/pcs/test/cib_resource/test_create.py b/pcs/test/cib_resource/test_create.py
-index cfb2e645..c554ec24 100644
+index 36202e34..e5f9dd4d 100644
 --- a/pcs/test/cib_resource/test_create.py
 +++ b/pcs/test/cib_resource/test_create.py
 @@ -233,7 +233,7 @@ class Success(ResourceTest):
@@ -378,7 +378,7 @@ index cfb2e645..c554ec24 100644
              ,
              """<resources>
                  <master id="R-master">
-@@ -1041,7 +1154,7 @@ class FailOrWarn(ResourceTest):
+@@ -1043,7 +1156,7 @@ class FailOrWarn(ResourceTest):
      def test_error_master_clone_combination(self):
          self.assert_pcs_fail(
              "resource create R ocf:heartbeat:Dummy --no-default-ops --clone"
@@ -387,7 +387,7 @@ index cfb2e645..c554ec24 100644
              ,
              "Error: you can specify only one of clone, master, bundle or"
                  " --group\n"
-@@ -1049,7 +1162,7 @@ class FailOrWarn(ResourceTest):
+@@ -1051,7 +1164,7 @@ class FailOrWarn(ResourceTest):
  
      def test_error_master_group_combination(self):
          self.assert_pcs_fail(
@@ -396,7 +396,7 @@ index cfb2e645..c554ec24 100644
                  " --group G"
              ,
              "Error: you can specify only one of clone, master, bundle or"
-@@ -1067,7 +1180,7 @@ class FailOrWarn(ResourceTest):
+@@ -1069,7 +1182,7 @@ class FailOrWarn(ResourceTest):
  
      def test_error_bundle_master_combination(self):
          self.assert_pcs_fail(
@@ -406,7 +406,7 @@ index cfb2e645..c554ec24 100644
              ,
              "Error: you can specify only one of clone, master, bundle or"
 diff --git a/pcs/test/test_constraints.py b/pcs/test/test_constraints.py
-index 9f0bc5d6..f5973410 100644
+index 07226acf..d17230ac 100644
 --- a/pcs/test/test_constraints.py
 +++ b/pcs/test/test_constraints.py
 @@ -346,43 +346,43 @@ Ticket Constraints:
@@ -500,10 +500,10 @@ index 9f0bc5d6..f5973410 100644
          ac(output, """\
  Warning: changing a monitor operation interval from 10 to 11 to make the operation unique
 diff --git a/pcs/test/test_resource.py b/pcs/test/test_resource.py
-index bd596f64..d8f68c12 100644
+index 59432999..7828efb4 100644
 --- a/pcs/test/test_resource.py
 +++ b/pcs/test/test_resource.py
-@@ -2826,7 +2826,7 @@ Ticket Constraints:
+@@ -2840,7 +2840,7 @@ Ticket Constraints:
  
          output, returnVal  = pcs(
              temp_cib,
@@ -512,7 +512,7 @@ index bd596f64..d8f68c12 100644
          )
          assert returnVal == 0
          assert output == "", [output]
-@@ -2919,7 +2919,7 @@ Warning: changing a monitor operation interval from 10 to 11 to make the operati
+@@ -2933,7 +2933,7 @@ Warning: changing a monitor operation interval from 10 to 11 to make the operati
          ac(o,"")
          assert r == 0
  
@@ -521,7 +521,7 @@ index bd596f64..d8f68c12 100644
          ac(o,"")
          assert r == 0
  
-@@ -3133,7 +3133,7 @@ Warning: changing a monitor operation interval from 10 to 11 to make the operati
+@@ -3147,7 +3147,7 @@ Warning: changing a monitor operation interval from 10 to 11 to make the operati
  
          output, returnVal = pcs(
              temp_cib,
@@ -530,7 +530,7 @@ index bd596f64..d8f68c12 100644
          )
          ac(output, "")
          self.assertEqual(0, returnVal)
-@@ -3727,7 +3727,7 @@ Error: Cannot remove more than one resource from cloned group
+@@ -3741,7 +3741,7 @@ Error: Cannot remove more than one resource from cloned group
          # However those test the pcs library. I'm leaving these tests here to
          # test the cli part for now.
          self.assert_pcs_success(
@@ -539,7 +539,7 @@ index bd596f64..d8f68c12 100644
              "Warning: changing a monitor operation interval from 10 to 11 to make the operation unique\n"
          )
  
-@@ -4761,7 +4761,7 @@ class CloneMasterUpdate(unittest.TestCase, AssertPcsMixin):
+@@ -4775,7 +4775,7 @@ class CloneMasterUpdate(unittest.TestCase, AssertPcsMixin):
  
      def test_no_op_allowed_in_master_update(self):
          self.assert_pcs_success(
@@ -549,13 +549,13 @@ index bd596f64..d8f68c12 100644
          self.assert_pcs_success("resource show dummy-master", outdent(
              """\
 diff --git a/pcs/utils.py b/pcs/utils.py
-index 5b608239..9b46810f 100644
+index 8a989f52..343a611b 100644
 --- a/pcs/utils.py
 +++ b/pcs/utils.py
-@@ -2861,6 +2861,13 @@ def get_modificators():
-         "start": "--start" in pcs_options,
+@@ -2904,6 +2904,13 @@ def get_modifiers():
          "wait": pcs_options.get("--wait", False),
          "watchdog": pcs_options.get("--watchdog", []),
+         "no_watchdog_validation": "--no-watchdog-validation" in pcs_options,
 +
 +        #This is for `pcs resource create`. Fix of the bug
 +        #https://bugzilla.redhat.com/show_bug.cgi?id=1378107

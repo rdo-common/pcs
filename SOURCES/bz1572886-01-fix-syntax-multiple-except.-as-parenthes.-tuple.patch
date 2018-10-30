@@ -1,0 +1,30 @@
+From 19ad28a9be0344b8c0bcde7c711ecbf5062a95ea Mon Sep 17 00:00:00 2001
+From: Ivan Devat <idevat@redhat.com>
+Date: Mon, 6 Aug 2018 08:43:47 +0200
+Subject: [PATCH] fix syntax (multiple except. as parenthes. tuple)
+
+See https://docs.python.org/2/tutorial/errors.html#handling-exceptions
+
+...the parentheses around this tuple are required, because except
+ValueError, e: was the syntax used for what is normally written as
+except ValueError as e: in modern Python...
+---
+ pcs/cluster.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/pcs/cluster.py b/pcs/cluster.py
+index a64fd5fd..b4d49d27 100644
+--- a/pcs/cluster.py
++++ b/pcs/cluster.py
+@@ -1138,7 +1138,7 @@ class IsComponentStartSupported(object):
+                     data["pcsd_capabilities"]
+                 ):
+                     self.supported = True
+-            except KeyError, ValueError:
++            except (KeyError, ValueError):
+                 # not a valid json or 404 => not supported
+                 pass
+ 
+-- 
+2.13.6
+

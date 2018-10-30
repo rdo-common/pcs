@@ -1,0 +1,86 @@
+From e66477b89b6a0ffbb9220c1a384c2a283dddcf17 Mon Sep 17 00:00:00 2001
+From: Ondrej Mular <omular@redhat.com>
+Date: Thu, 23 Aug 2018 14:49:05 +0200
+Subject: [PATCH] squash bz1475318 RFE: Validate node's watchdog dev
+
+6ae0b56ea1d9 fix watchdog device test error message
+
+3685516072c8 Mark all watchdogs listed by SBD as supported
+---
+ pcs/lib/sbd.py |  6 +++---
+ pcs/stonith.py | 22 +++++-----------------
+ pcsd/remote.rb |  5 ++++-
+ 3 files changed, 12 insertions(+), 21 deletions(-)
+
+diff --git a/pcs/lib/sbd.py b/pcs/lib/sbd.py
+index caf86a18..0e7f5b92 100644
+--- a/pcs/lib/sbd.py
++++ b/pcs/lib/sbd.py
+@@ -302,10 +302,10 @@ def test_watchdog(cmd_runner, watchdog=None):
+     cmd = [settings.sbd_binary, "test-watchdog"]
+     if watchdog:
+         cmd.extend(["-w", watchdog])
+-    dummy_std_out, std_err, ret_val = cmd_runner.run(cmd)
++    std_out, dummy_std_err, ret_val = cmd_runner.run(cmd)
+     if ret_val:
+-        if "Multiple watchdog devices discovered" in std_err:
++        if "Multiple watchdog devices discovered" in std_out:
+             raise LibraryError(reports.sbd_watchdog_test_multiple_devices())
+-        raise LibraryError(reports.sbd_watchdog_test_error(std_err))
++        raise LibraryError(reports.sbd_watchdog_test_error(std_out))
+     else:
+         raise LibraryError(reports.sbd_watchdog_test_failed())
+diff --git a/pcs/stonith.py b/pcs/stonith.py
+index cc805da8..707321ca 100644
+--- a/pcs/stonith.py
++++ b/pcs/stonith.py
+@@ -503,25 +503,13 @@ def sbd_watchdog_list(lib, argv, modifiers):
+         raise CmdLineInputError()
+ 
+     available_watchdogs = lib.sbd.get_local_available_watchdogs()
+-    supported_watchdog_list = [
+-        wd for wd, wd_info in available_watchdogs.items()
+-        if wd_info["caution"] is None
+-    ]
+-    unsupported_watchdog_list = [
+-        wd for wd in available_watchdogs
+-        if wd not in supported_watchdog_list
+-    ]
+-
+-    if supported_watchdog_list:
+-        print("Supported watchdog(s):")
+-        for watchdog in supported_watchdog_list:
+-            print("  {}".format(watchdog))
+ 
+-    if unsupported_watchdog_list:
+-        print("Unsupported watchdog(s):")
+-        for watchdog in unsupported_watchdog_list:
++    if available_watchdogs:
++        print("Available watchdog(s):")
++        for watchdog in sorted(available_watchdogs.keys()):
+             print("  {}".format(watchdog))
+-
++    else:
++        print("No available watchdog")
+ 
+ def sbd_watchdog_list_json(lib, argv, modifiers):
+     if argv:
+diff --git a/pcsd/remote.rb b/pcsd/remote.rb
+index 27af41b2..a74f28f5 100644
+--- a/pcsd/remote.rb
++++ b/pcsd/remote.rb
+@@ -2408,7 +2408,10 @@ def check_sbd(param, request, auth_user)
+         :path => watchdog,
+         :exist => exists,
+         :is_supported => (
+-          exists and available_watchdogs[watchdog]['caution'] == nil
++          # this method is not reliable so all watchdog devices listed by SBD
++          # will be listed as supported for now
++          # exists and available_watchdogs[watchdog]['caution'] == nil
++          exists
+         ),
+       }
+     rescue JSON::ParserError
+-- 
+2.13.6
+

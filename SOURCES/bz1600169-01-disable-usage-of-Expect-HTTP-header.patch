@@ -1,0 +1,79 @@
+From 5df7d647e3cdb4b73e0bfd0a4fa83b78efd861f5 Mon Sep 17 00:00:00 2001
+From: Ivan Devat <idevat@redhat.com>
+Date: Mon, 6 Aug 2018 08:43:47 +0200
+Subject: [PATCH] disable usage of 'Expect' HTTP header
+
+---
+ pcs/common/node_communicator.py | 1 +
+ pcs/lib/external.py             | 1 +
+ pcs/test/tools/custom_mock.py   | 4 ++++
+ pcs/utils.py                    | 1 +
+ pcsd/pcs.rb                     | 1 +
+ 5 files changed, 8 insertions(+)
+
+diff --git a/pcs/common/node_communicator.py b/pcs/common/node_communicator.py
+index f7fe2419..d54e8566 100644
+--- a/pcs/common/node_communicator.py
++++ b/pcs/common/node_communicator.py
+@@ -532,6 +532,7 @@ def _create_request_handle(request, cookies, timeout):
+     handle.setopt(pycurl.SSL_VERIFYHOST, 0)
+     handle.setopt(pycurl.SSL_VERIFYPEER, 0)
+     handle.setopt(pycurl.NOSIGNAL, 1) # required for multi-threading
++    handle.setopt(pycurl.HTTPHEADER, ["Expect: "])
+     if cookies:
+         handle.setopt(
+             pycurl.COOKIE, _dict_to_cookies(cookies).encode("utf-8")
+diff --git a/pcs/lib/external.py b/pcs/lib/external.py
+index fe17a864..e53a54ee 100644
+--- a/pcs/lib/external.py
++++ b/pcs/lib/external.py
+@@ -620,6 +620,7 @@ class NodeCommunicator(object):
+         handler.setopt(pycurl.SSL_VERIFYHOST, 0)
+         handler.setopt(pycurl.SSL_VERIFYPEER, 0)
+         handler.setopt(pycurl.NOSIGNAL, 1) # required for multi-threading
++        handler.setopt(pycurl.HTTPHEADER, ["Expect: "])
+         if cookies:
+             handler.setopt(pycurl.COOKIE, ";".join(cookies).encode("utf-8"))
+         if data:
+diff --git a/pcs/test/tools/custom_mock.py b/pcs/test/tools/custom_mock.py
+index c05a5a45..849f83fb 100644
+--- a/pcs/test/tools/custom_mock.py
++++ b/pcs/test/tools/custom_mock.py
+@@ -75,6 +75,10 @@ class MockCurl(object):
+         self._opts = {}
+ 
+     def setopt(self, opt, val):
++        if isinstance(val, list):
++           # in tests we use set operations (e.g. assertLessEqual) which
++           # require hashable values
++           val = tuple(val)
+         if val is None:
+             self.unsetopt(opt)
+         else:
+diff --git a/pcs/utils.py b/pcs/utils.py
+index 347ad73e..8a989f52 100644
+--- a/pcs/utils.py
++++ b/pcs/utils.py
+@@ -498,6 +498,7 @@ def sendHTTPRequest(
+     handler.setopt(pycurl.TIMEOUT_MS, int(timeout * 1000))
+     handler.setopt(pycurl.SSL_VERIFYHOST, 0)
+     handler.setopt(pycurl.SSL_VERIFYPEER, 0)
++    handler.setopt(pycurl.HTTPHEADER, ["Expect: "])
+     if cookies:
+         handler.setopt(pycurl.COOKIE, ";".join(cookies).encode("utf-8"))
+     if data:
+diff --git a/pcsd/pcs.rb b/pcsd/pcs.rb
+index 66919c0c..ad153f62 100644
+--- a/pcsd/pcs.rb
++++ b/pcsd/pcs.rb
+@@ -513,6 +513,7 @@ def send_request(
+     :httpget => (post ? 0 : 1),
+     :nosignal => 1, # required for multi-threading
+   })
++  req.compose_header('Expect', '')
+   return_code = req.perform
+   if return_code == :ok
+     return req.response_code, req.response_body
+-- 
+2.13.6
+

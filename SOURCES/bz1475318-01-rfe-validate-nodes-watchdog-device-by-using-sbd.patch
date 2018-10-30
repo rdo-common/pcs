@@ -1,0 +1,111 @@
+From 2e5005b822b1dab3d074361f46607af3bd696b71 Mon Sep 17 00:00:00 2001
+From: Ivan Devat <idevat@redhat.com>
+Date: Mon, 6 Aug 2018 08:43:47 +0200
+Subject: [PATCH] squash bz1475318 RFE: Validate node's watchdog dev
+
+9d95b73a1b22 do not connect stdin of subprocess to pcs's stdin
+
+7607976d478e fix tests
+---
+ pcs/lib/external.py           | 10 +++++++++-
+ pcs/test/test_lib_external.py |  8 ++++----
+ pcs/utils.py                  |  8 +++++++-
+ 3 files changed, 20 insertions(+), 6 deletions(-)
+
+diff --git a/pcs/lib/external.py b/pcs/lib/external.py
+index 5507543f..fe17a864 100644
+--- a/pcs/lib/external.py
++++ b/pcs/lib/external.py
+@@ -25,6 +25,12 @@ try:
+ except ImportError:
+     # python3
+     from urllib.parse import urlencode as urllib_urlencode
++try:
++    # python 3
++    from subprocess import DEVNULL
++except ImportError:
++    # python 2
++    DEVNULL = open(os.devnull, "r")
+ 
+ from pcs import settings
+ from pcs.common import pcs_pycurl as pycurl
+@@ -401,7 +407,9 @@ class CommandRunner(object):
+             process = subprocess.Popen(
+                 args,
+                 # Some commands react differently if they get anything via stdin
+-                stdin=(subprocess.PIPE if stdin_string is not None else None),
++                stdin=(
++                    subprocess.PIPE if stdin_string is not None else DEVNULL
++                ),
+                 stdout=subprocess.PIPE,
+                 stderr=subprocess.PIPE,
+                 preexec_fn=(
+diff --git a/pcs/test/test_lib_external.py b/pcs/test/test_lib_external.py
+index b249c47a..85c52a18 100644
+--- a/pcs/test/test_lib_external.py
++++ b/pcs/test/test_lib_external.py
+@@ -74,7 +74,7 @@ class CommandRunnerTest(TestCase):
+         self.assert_popen_called_with(
+             mock_popen,
+             command,
+-            {"env": {}, "stdin": None,}
++            {"env": {}, "stdin": lib.DEVNULL,}
+         )
+         logger_calls = [
+             mock.call("Running: {0}\nEnvironment:".format(command_str)),
+@@ -158,7 +158,7 @@ class CommandRunnerTest(TestCase):
+         self.assert_popen_called_with(
+             mock_popen,
+             command,
+-            {"env": {"a": "a", "b": "B", "c": "{C}"}, "stdin": None,}
++            {"env": {"a": "a", "b": "B", "c": "{C}"}, "stdin": lib.DEVNULL,}
+         )
+         logger_calls = [
+             mock.call(
+@@ -327,7 +327,7 @@ class CommandRunnerTest(TestCase):
+         self.assert_popen_called_with(
+             mock_popen,
+             command,
+-            {"env": {}, "stdin": None,}
++            {"env": {}, "stdin": lib.DEVNULL,}
+         )
+         logger_calls = [
+             mock.call("Running: {0}\nEnvironment:".format(command_str)),
+@@ -376,7 +376,7 @@ class CommandRunnerTest(TestCase):
+         self.assert_popen_called_with(
+             mock_popen,
+             command,
+-            {"env": {}, "stdin": None,}
++            {"env": {}, "stdin": lib.DEVNULL,}
+         )
+         logger_calls = [
+             mock.call("Running: {0}\nEnvironment:".format(command_str)),
+diff --git a/pcs/utils.py b/pcs/utils.py
+index eb02ca34..347ad73e 100644
+--- a/pcs/utils.py
++++ b/pcs/utils.py
+@@ -86,6 +86,12 @@ try:
+ except ImportError:
+     # python3
+     from urllib.parse import urlencode as urllib_urlencode
++try:
++    # python 3
++    from subprocess import DEVNULL
++except ImportError:
++    # python 2
++    DEVNULL = open(os.devnull, "r")
+ 
+ 
+ PYTHON2 = (sys.version_info.major == 2)
+@@ -1035,7 +1041,7 @@ def run(
+         if string_for_stdin != None:
+             stdin_pipe = subprocess.PIPE
+         else:
+-            stdin_pipe = None
++            stdin_pipe = DEVNULL
+ 
+         p = subprocess.Popen(
+             args,
+-- 
+2.13.6
+

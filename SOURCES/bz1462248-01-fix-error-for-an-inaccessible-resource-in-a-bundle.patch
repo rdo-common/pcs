@@ -1,0 +1,62 @@
+From 8811ee0493b956207f3336e9e0eb1395a530af8f Mon Sep 17 00:00:00 2001
+From: Ivan Devat <idevat@redhat.com>
+Date: Mon, 6 Aug 2018 08:43:47 +0200
+Subject: [PATCH] fix error for an inaccessible resource in a bundle
+
+---
+ pcs/cli/common/console_report.py           | 6 +++---
+ pcs/cli/common/test/test_console_report.py | 6 +++---
+ pcs/resource.py                            | 1 +
+ 3 files changed, 7 insertions(+), 6 deletions(-)
+
+diff --git a/pcs/cli/common/console_report.py b/pcs/cli/common/console_report.py
+index f2cee05e..06ea8f72 100644
+--- a/pcs/cli/common/console_report.py
++++ b/pcs/cli/common/console_report.py
+@@ -1434,8 +1434,8 @@ CODE_TO_MESSAGE_BUILDER_MAP = {
+     ,
+     codes.RESOURCE_IN_BUNDLE_NOT_ACCESSIBLE: lambda info:
+         (
+-            "Resource '{resource_id}' will not be accessible by the cluster "
+-            "inside bundle '{bundle_id}'. At least one of bundle options "
+-            "'control-port' or 'ip-range-start' has to be specified."
++            "Resource '{inner_resource_id}' will not be accessible by the "
++            "cluster inside bundle '{bundle_id}', at least one of bundle "
++            "options 'control-port' or 'ip-range-start' has to be specified"
+         ).format(**info)
+ }
+diff --git a/pcs/cli/common/test/test_console_report.py b/pcs/cli/common/test/test_console_report.py
+index dee633ad..5fe49466 100644
+--- a/pcs/cli/common/test/test_console_report.py
++++ b/pcs/cli/common/test/test_console_report.py
+@@ -2126,12 +2126,12 @@ class ResourceInBundleNotAccessible(NameBuildTest):
+         self.assert_message_from_info(
+             (
+                 "Resource 'resourceA' will not be accessible by the cluster "
+-                "inside bundle 'bundleA'. At least one of bundle options "
+-                "'control-port' or 'ip-range-start' has to be specified."
++                "inside bundle 'bundleA', at least one of bundle options "
++                "'control-port' or 'ip-range-start' has to be specified"
+             ),
+             dict(
+                 bundle_id="bundleA",
+-                resource_id="resourceA",
++                inner_resource_id="resourceA",
+             )
+         )
+ 
+diff --git a/pcs/resource.py b/pcs/resource.py
+index 001bad50..c605cc6a 100644
+--- a/pcs/resource.py
++++ b/pcs/resource.py
+@@ -439,6 +439,7 @@ def resource_create(lib, argv, modifiers):
+             **settings
+         )
+     elif "bundle" in parts:
++        settings["allow_not_accessible_resource"] = modifiers["force"]
+         lib.resource.create_into_bundle(
+             ra_id, ra_type, parts["op"],
+             parts["meta"],
+-- 
+2.13.6
+

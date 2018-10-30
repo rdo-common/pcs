@@ -1,0 +1,25 @@
+From 47400e6389452291ac44294181789665f90061d1 Mon Sep 17 00:00:00 2001
+From: Ivan Devat <idevat@redhat.com>
+Date: Mon, 6 Aug 2018 08:43:47 +0200
+Subject: [PATCH] fix node communicator getter
+
+---
+ pcs/lib/env.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/pcs/lib/env.py b/pcs/lib/env.py
+index 46eb9467..86f67b64 100644
+--- a/pcs/lib/env.py
++++ b/pcs/lib/env.py
+@@ -417,7 +417,7 @@ class LibraryEnvironment(object):
+         return NodeCommunicator(
+             self.logger,
+             self.report_processor,
+-            self.__get_auth_tokens(),
++            self.__get_token_file()["tokens"],
+             self.user_login,
+             self.user_groups,
+             self._request_timeout
+-- 
+2.13.6
+
