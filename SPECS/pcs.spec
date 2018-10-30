@@ -6,7 +6,7 @@ URL: https://github.com/ClusterLabs/pcs
 Group: System Environment/Base
 Summary: Pacemaker Configuration System
 #building only for architectures with pacemaker and corosync available
-ExclusiveArch: i686 x86_64 s390x ppc64le aarch64
+ExclusiveArch: i686 x86_64 s390x ppc64le aarch64 %{arm}
 
 %global pcs_snmp_pkg_name  pcs-snmp
 %global pyagentx_version   0.4.pcs.1
@@ -35,6 +35,7 @@ Source23: https://rubygems.org/downloads/ffi-1.9.25.gem
 
 Source31: https://github.com/testing-cabal/mock/archive/1.0.1.tar.gz#/mock-1.0.1.tar.gz
 Source41: https://github.com/ondrejmular/pyagentx/archive/v%{pyagentx_version}.tar.gz#/pyagentx-%{pyagentx_version}.tar.gz
+Source99: favicon.ico
 
 Patch1: bz1462248-01-fix-error-for-an-inaccessible-resource-in-a-bundle.patch
 Patch2: bz1572886-01-fix-syntax-multiple-except.-as-parenthes.-tuple.patch
@@ -213,6 +214,7 @@ mv %{bundled_lib_dir}/pyagentx-%{pyagentx_version} %{pyagentx_dir}
 cp %{pyagentx_dir}/LICENSE.txt pyagentx_LICENSE.txt
 cp %{pyagentx_dir}/CONTRIBUTORS.txt pyagentx_CONTRIBUTORS.txt
 cp %{pyagentx_dir}/README.md pyagentx_README.md
+cp -f %{SOURCE99} pcsd/public
 
 %build
 
@@ -450,6 +452,10 @@ run_all_tests
 %doc pyagentx_README.md
 
 %changelog
+* Tue Oct 30 2018 Johnny Hughes <johnny@centos.org> - 0.9.165-6
+- Manual CentOS Debrnading
+
+- Modify to build on armhfp 
 * Fri Aug 31 2018 Ondrej Mular <omular@redhat.com> - 0.9.165-6
 - Fix instance attributes setting for fence agents `fence_compute` and
   `fence_evacuate`
