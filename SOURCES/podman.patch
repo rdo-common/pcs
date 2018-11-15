@@ -1,0 +1,78 @@
+From 8ba8234b4159a66f7988a2b4493df12e66d4e56b Mon Sep 17 00:00:00 2001
+From: Michele Baldessari <michele@acksyn.org>
+Date: Tue, 21 Aug 2018 12:27:25 +0200
+Subject: [PATCH] Initial support for podman
+
+This change allows a user to specify the podman backend
+when creating a bundle.
+Tested with https://github.com/ClusterLabs/pacemaker/pull/1564 (pcmk)
+and https://github.com/ClusterLabs/resource-agents/pull/1193 (r-a)
+to create a simple podman-backed bundle via pcs:
+podman container set: test_bundle [docker.io/sdelrio/docker-minimal-nginx]
+  test_bundle-podman-0 (ocf:heartbeatpodman): Started nodea
+  test_bundle-podman-1 (ocf:heartbeatpodman): Started nodeb
+  test_bundle-podman-2 (ocf:heartbeatpodman): Started nodec
+---
+ pcs/lib/cib/resource/bundle.py                       | 9 ++++++---
+ pcs/lib/commands/test/resource/test_bundle_create.py | 2 +-
+ pcs/test/cib_resource/test_bundle.py                 | 2 +-
+ 3 files changed, 8 insertions(+), 5 deletions(-)
+
+diff --git a/pcs/lib/cib/resource/bundle.py b/pcs/lib/cib/resource/bundle.py
+index 0de03a9..043e8b9 100644
+--- a/pcs/lib/cib/resource/bundle.py
++++ b/pcs/lib/cib/resource/bundle.py
+@@ -118,10 +118,13 @@ def append_new(
+     bundle_element = etree.SubElement(parent_element, TAG, {"id": bundle_id})
+     # TODO create the proper element once more container_types are supported
+     # by pacemaker
+-    docker_element = etree.SubElement(bundle_element, "docker")
++    if container_type == 'docker':
++        container_element = etree.SubElement(bundle_element, "docker")
++    elif container_type == 'podman':
++        container_element = etree.SubElement(bundle_element, "podman")
+     # Do not add options with empty values. When updating, an empty value means
+     # remove the option.
+-    update_attributes_remove_empty(docker_element, container_options)
++    update_attributes_remove_empty(container_element, container_options)
+     if network_options or port_map:
+         network_element = etree.SubElement(bundle_element, "network")
+         # Do not add options with empty values. When updating, an empty value
+@@ -311,7 +314,7 @@ def get_inner_resource(bundle_el):
+     return None
+ 
+ def _validate_container_type(container_type):
+-    return validate.value_in("type", ("docker", ), "container type")({
++    return validate.value_in("type", ("docker", "podman"), "container type")({
+         "type": container_type,
+     })
+ 
+diff --git a/pcs/lib/commands/test/resource/test_bundle_create.py b/pcs/lib/commands/test/resource/test_bundle_create.py
+index ab3d6aa..0102cfa 100644
+--- a/pcs/lib/commands/test/resource/test_bundle_create.py
++++ b/pcs/lib/commands/test/resource/test_bundle_create.py
+@@ -80,7 +80,7 @@ class MinimalCreate(TestCase):
+                     {
+                         "option_name": "container type",
+                         "option_value": "nonsense",
+-                        "allowed_values": ("docker", ),
++                        "allowed_values": ("docker", "podman"),
+                     },
+                     None
+                 ),
+diff --git a/pcs/test/cib_resource/test_bundle.py b/pcs/test/cib_resource/test_bundle.py
+index 16823aa..393a76d 100644
+--- a/pcs/test/cib_resource/test_bundle.py
++++ b/pcs/test/cib_resource/test_bundle.py
+@@ -174,7 +174,7 @@ class BundleCreate(BundleCreateCommon):
+     def test_fail_when_missing_container_type(self):
+         self.assert_pcs_fail_regardless_of_force(
+             "resource bundle create B1",
+-            "Error: '' is not a valid container type value, use docker\n"
++            "Error: '' is not a valid container type value, use docker, podman\n"
+         )
+ 
+     def test_fail_when_missing_required(self):
+-- 
+2.19.1
+

@@ -1,6 +1,6 @@
 Name: pcs
 Version: 0.9.165
-Release: 6%{?dist}
+Release: 6.podmanrhel7.0%{?dist}.2
 License: GPLv2
 URL: https://github.com/ClusterLabs/pcs
 Group: System Environment/Base
@@ -53,6 +53,7 @@ Patch100: adapt-working-with-gems-to-rhel-7.patch
 #rhel7 gui
 Patch101: change-cman-to-rhel6-in-messages.patch
 Patch102: show-only-warning-when-crm_mon-xml-is-invalid.patch
+Patch107: podman.patch
 
 # git for patches
 BuildRequires: git
